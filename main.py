@@ -78,6 +78,7 @@ def fetch_arxiv(since=None):
                 'authors': [a.find('a:name', ns).text for a in e.findall('a:author', ns)][:6],
                 'venue': 'arXiv',
                 'url': f'https://arxiv.org/abs/{aid}',
+                'pdf': f'https://arxiv.org/pdf/{aid}',
                 'date': (e.find('a:published', ns).text or '')[:10],
             })
         return out
@@ -249,7 +250,10 @@ def llm_annotate(papers):
         '{"score": 0到10的整数(与课题相关性), "one_line": "一句话概括论文做了什么(中文)", '
         '"summary": "2-3句中文总结(痛点/方法/结果)", '
         '"connection": "与我的课题的具体联系，指明相关模块(如M1架构/M2领域预训练/M3微调/KG约束/landing/评测/数据/可对比基线)；若无关就写\\"无关\\"", '
-        '"tag": "M1|M2|M3|KG|landing|eval|data|baseline|无关"}'
+        '"inspiration": "这篇论文能给课题带来的新启发或可直接偷的具体做法(1-2句)；没有则写\\"无\\"", '
+        '"limitation": "论文自身局限或引用时注意点(1句)", '
+        '"action": "精读|对比基线|引用|略读|忽略 之一", '
+        '"tag": "M1|M2|M3|KG|landing|eval|data|baseline|综述|无关 之一"}'
     )
     ok = 0
     for p in papers:
@@ -269,6 +273,9 @@ def llm_annotate(papers):
             p['one_line'] = d.get('one_line', '')
             p['summary'] = d.get('summary', '')
             p['connection'] = d.get('connection', '')
+            p['inspiration'] = d.get('inspiration', '')
+            p['limitation'] = d.get('limitation', '')
+            p['action'] = d.get('action', '')
             p['tag'] = d.get('tag', '')
             ok += 1
         except Exception as e:
@@ -279,6 +286,29 @@ def llm_annotate(papers):
     return papers, status
 
 
+def llm_editorial(hit):
+    key = os.environ.get('LIT_LLM_API_KEY', '')
+    base = os.environ.get('LIT_LLM_BASE_URL', CFG['llm'].get('base_url', ''))
+    model = os.environ.get('LIT_LLM_MODEL', CFG['llm'].get('model', ''))
+    if not (key and base and model and hit):
+        return ''
+    listing = '\n'.join(f'- [{p.get("score")}] {p["title"]}：{p.get("one_line", "")}' for p in hit)
+    sys_p = ('你是文献日报主编。以下是今日命中论文列表。用 2-3 句中文写一段"今日速览"导语：'
+             '今天整体风向是什么、最该先看哪 1-2 篇、与课题的紧迫关联（竞品动向/可借的东风）。'
+             '直接输出导语正文，不要标题、不要客套、不要列表。')
+    try:
+        r = http_post_json(
+            base.rstrip('/') + '/chat/completions',
+            {'model': model, 'temperature': 0.4,
+             'messages': [{'role': 'system', 'content': sys_p},
+                          {'role': 'user', 'content': listing}]},
+            {'Authorization': 'Bearer ' + key})
+        return r['choices'][0]['message']['content'].strip()
+    except Exception as e:
+        print(f'  [warn] 导语生成失败: {e}')
+        return ''
+
+
 # ---------------- 渲染 ----------------
 
 def pick(kept):
@@ -287,51 +317,122 @@ def pick(kept):
     return hit[:CFG['max_papers']]
 
 
-def render_md(hit, today, total_fetched, total_fresh, llm_status='未知'):
+GROUPS = [('baseline', '🎯 直接竞品与对比基线'),
+          ('M1', '🧩 M1 · 自研架构'),
+          ('M2', '🎓 M2 · 领域继续预训练与后训练'),
+          ('M3', '⚡ M3 · 任务级微调'),
+          ('KG', '🕸️ 知识图谱与约束'),
+          ('landing', '🛬 Landing 与工具落地'),
+          ('eval', '📏 评测与基准'),
+          ('data', '📦 数据与语料'),
+          ('综述', '📚 综述与立场'),
+          (None, '🧷 其他')]
+
+
+def _links_md(p):
+    s = f'[原文]({p["url"]})'
+    if p.get('pdf'):
+        s += f' · [PDF]({p["pdf"]})'
+    return s
+
+
+def _card_md(p):
+    s = p.get('score')
+    stars = '⭐' * max(1, round((s or 5) / 2)) if s is not None else '▫️'
+    lines = [f'### {stars} {p["title"]}',
+             f'**{s if s is not None else "-"}/10** · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]} · {_links_md(p)}']
+    if p.get('why'):
+        lines.append(f'*入选：{p["why"]}*')
+    if p.get('one_line'):
+        lines.append(f'\n**一句话**：{p["one_line"]}')
+    if p.get('summary'):
+        lines.append(f'\n{p["summary"]}')
+    if p.get('connection'):
+        lines.append(f'\n> 🔗 **与课题**：{p["connection"]}')
+    if p.get('inspiration'):
+        lines.append(f'\n💡 **启发**：{p["inspiration"]}')
+    if p.get('limitation'):
+        lines.append(f'\n⚠️ **局限**：{p["limitation"]}')
+    if p.get('action'):
+        lines.append(f'\n**▸ 建议：{p["action"]}**')
+    lines.append('')
+    return lines
+
+
+def render_md(hit, today, total_fetched, total_fresh, llm_status='未知', editorial=''):
     lines = [f'# 📚 文献日报 {today}', '',
              f'> 采集 {total_fresh} 篇（昨日窗口共 {total_fetched} 条）→ 收录 {len(hit)} 篇'
              f'｜阈值 {CFG["min_score"]}/10｜上限 {CFG["max_papers"]} 篇',
              f'> AI 总结：**{llm_status}**', '']
+    if editorial:
+        lines += [f'**📮 今日速览**：{editorial}', '']
     if not hit:
         lines.append('今天没有命中文献。')
+    grouped = {}
     for p in hit:
-        s = p.get('score')
-        stars = '⭐' * max(1, round((s or 5) / 2)) if s is not None else '▫️'
-        lines.append(f'## {stars} {p["title"]}')
-        meta = f'**{s if s is not None else "-"}/10** · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]}'
-        lines.append(meta + f' · [原文]({p["url"]})')
-        if p.get('why'):
-            lines.append(f'*入选：{p["why"]}*')
-        if p.get('one_line'):
-            lines.append(f'\n**一句话**：{p["one_line"]}')
-        if p.get('summary'):
-            lines.append(f'\n{p["summary"]}')
-        if p.get('connection'):
-            lines.append(f'\n> 🔗 **与课题**：{p["connection"]}')
+        tag = p.get('tag') if p.get('tag') in {g[0] for g in GROUPS if g[0]} else None
+        grouped.setdefault(tag, []).append(p)
+    for tag, title in GROUPS:
+        grp = grouped.get(tag)
+        if not grp:
+            continue
+        grp.sort(key=lambda p: p.get('score') or 0, reverse=True)
+        lines.append(f'## {title}（{len(grp)} 篇）')
         lines.append('')
-    lines.append('---\n*geo-lit-daily 自动生成*')
+        for p in grp:
+            lines += _card_md(p)
+    lines.append('---\n*geo-lit-daily 自动生成 · 画像与阈值见 config.yaml*')
     return '\n'.join(lines)
 
 
-def render_html(hit, today, llm_status='未知'):
+def _card_html(p):
+    s = p.get('score', '?')
+    pdf = f' · <a href="{p["pdf"]}">PDF</a>' if p.get('pdf') else ''
+    rows = (f'<h3 style="margin:0 0 6px"><a href="{p["url"]}">{p["title"]}</a></h3>'
+            f'<div style="color:#888;font-size:12px">{s}/10 · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]}'
+            f' · <a href="{p["url"]}">原文</a>{pdf}</div>')
+    if p.get('one_line'):
+        rows += f'<p style="font-size:13px"><b>一句话：</b>{p["one_line"]}</p>'
+    if p.get('summary'):
+        rows += f'<p style="font-size:13px">{p["summary"]}</p>'
+    if p.get('connection'):
+        rows += (f'<p style="font-size:13px;background:#eef5ff;padding:8px;border-radius:6px">'
+                 f'<b>🔗 与课题：</b>{p["connection"]}</p>')
+    if p.get('inspiration'):
+        rows += (f'<p style="font-size:13px;background:#f3f0ff;padding:8px;border-radius:6px">'
+                 f'<b>💡 启发：</b>{p["inspiration"]}</p>')
+    if p.get('limitation'):
+        rows += f'<p style="font-size:12px;color:#a06000">⚠️ {p["limitation"]}</p>'
+    if p.get('action'):
+        rows += f'<p style="font-size:13px"><b>▸ 建议：{p["action"]}</b></p>'
+    return (f'<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin:12px 0;'
+            f'font-family:sans-serif;max-width:720px">{rows}</div>')
+
+
+def render_html(hit, today, llm_status='未知', editorial=''):
     good = llm_status.startswith('正常')
     color = '#2e7d32' if good else '#e65100'
     bg = '#e8f5e9' if good else '#fff3e0'
-    banner = (f'<div style="padding:8px 12px;border-radius:6px;background:{bg};color:{color};'
-              f'font-size:13px;font-family:sans-serif;margin:8px 0;max-width:720px">'
-              f'<b>AI 总结：{llm_status}</b></div>')
-    cards = []
+    out = (f'<h2>📚 文献日报 {today}（{len(hit)} 篇）</h2>'
+           f'<div style="padding:8px 12px;border-radius:6px;background:{bg};color:{color};'
+           f'font-size:13px;font-family:sans-serif;margin:8px 0;max-width:720px">'
+           f'<b>AI 总结：{llm_status}</b></div>')
+    if editorial:
+        out += (f'<div style="background:#f5f0ff;border-left:4px solid #7c4dff;padding:10px 14px;'
+                f'font-size:14px;font-family:sans-serif;margin:10px 0;max-width:720px">'
+                f'<b>📮 今日速览</b><br>{editorial}</div>')
+    grouped = {}
     for p in hit:
-        s = p.get('score', '?')
-        cards.append(
-            f'<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin:12px 0;font-family:sans-serif;max-width:720px">'
-            f'<h3 style="margin:0 0 6px"><a href="{p["url"]}">{p["title"]}</a></h3>'
-            f'<div style="color:#888;font-size:12px">{s}/10 · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]}</div>'
-            + (f'<p style="font-size:13px"><b>一句话：</b>{p.get("one_line","")}</p>' if p.get('one_line') else '')
-            + (f'<p style="font-size:13px">{p.get("summary","")}</p>' if p.get('summary') else '')
-            + (f'<p style="font-size:13px;background:#eef5ff;padding:8px;border-radius:6px"><b>🔗 与课题：</b>{p.get("connection","")}</p>' if p.get('connection') else '')
-            + '</div>')
-    return f'<h2>📚 文献日报 {today}（{len(hit)} 篇）</h2>' + banner + ''.join(cards)
+        tag = p.get('tag') if p.get('tag') in {g[0] for g in GROUPS if g[0]} else None
+        grouped.setdefault(tag, []).append(p)
+    for tag, title in GROUPS:
+        grp = grouped.get(tag)
+        if not grp:
+            continue
+        grp.sort(key=lambda p: p.get('score') or 0, reverse=True)
+        out += f'<h2 style="font-size:16px">{title}（{len(grp)} 篇）</h2>'
+        out += ''.join(_card_html(p) for p in grp)
+    return out
 
 
 def render_backlog(hit, since, n_cand, n_scored, llm_status):
@@ -510,7 +611,8 @@ def main():
     hit = pick(kept)
     print(f'[收录] {len(hit)} 篇')
 
-    md = render_md(hit, today, len(papers), len(fresh), llm_status)
+    editorial = llm_editorial(hit) if hit else ''
+    md = render_md(hit, today, len(papers), len(fresh), llm_status, editorial)
     os.makedirs(os.path.join(BASE, 'daily'), exist_ok=True)
     out = os.path.join(BASE, 'daily', today + '.md')
     with open(out, 'w', encoding='utf-8') as f:
@@ -525,7 +627,7 @@ def main():
             subj = f'📚 文献日报 {today}: {len(hit)} 篇命中'
             if not llm_status.startswith('正常'):
                 subj += f'（AI总结{llm_status[:6]}…）'
-            push_email(subj, render_html(hit, today, llm_status))
+            push_email(subj, render_html(hit, today, llm_status, editorial))
             push_wechat(f'文献日报 {today}: {len(hit)}篇', md)
         else:
             print('[info] 今日无命中，不推送')
