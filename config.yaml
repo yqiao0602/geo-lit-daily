@@ -50,6 +50,7 @@ openalex:
     - "GIS agent"
     - "geographic question answering"
     - "spatially explicit machine learning"
+    - "geospatial tool"
 
 # ---- 关键词粗筛（省 LLM token 的第一道闸）----
 # 规则：命中 strong 任一 → 收；或 命中 domain≥1 且 task≥1 → 收
@@ -59,13 +60,14 @@ filter:
                  spatially explicit, geo-, geoprocess, mapping, cartograph, land cover,
                  land use, satellite, lidar, terrain, earth science, geoai]
   task_terms: [code generation, code synthesis, program synthesis, workflow, operator,
-               toolchain, agent, llm, large language model, foundation model, fine-tun,
-               instruction tun, prompt, model builder, knowledge graph, ontology,
-               chain-of-thought, retrieval-augmented, rag, copilot, chatbot, hallucinat,
-               natural language, text-to-, automation, script, geo-question, question answering]
+               toolchain, tool use, tool sequence, tool call, function call, agent, llm,
+               language model, foundation model, fine-tun, instruction tun, prompt,
+               model builder, knowledge graph, ontology, chain-of-thought,
+               retrieval-augmented, rag, copilot, chatbot, hallucinat, natural language,
+               text-to-, automation, script, geo-question, question answering]
   strong_terms: [geospatial code, gis copilot, earth engine, qgis, geoprocessing workflow,
                  spatial workflow, gis agent, geoai, geospatial agent, geographic question,
-                 nl2gis, gis large language]
+                 nl2gis, gis large language, geospatial tool, gis tool, geoagent]
 
 # ---- LLM（OpenAI 兼容协议；密钥走环境变量 LIT_LLM_API_KEY）----
 llm:
