@@ -212,7 +212,9 @@ def llm_annotate(papers):
     model = os.environ.get('LIT_LLM_MODEL', CFG['llm'].get('model', ''))
     if not (key and base and model):
         print('[info] 未配置 LIT_LLM_API_KEY，跳过 LLM 打分（仅关键词粗筛）')
-        return papers
+        return papers, '未启用（未配置 LLM Secret）'
+    if not papers:
+        return papers, '无候选'
     sys_prompt = (
         '你是科研文献筛选助手。我的研究方向如下：\n' + CFG['profile'].strip() + '\n\n'
         '下面给你一篇论文的标题与摘要，请只输出一个 JSON 对象，不要输出任何其他文字：\n'
@@ -221,6 +223,7 @@ def llm_annotate(papers):
         '"connection": "与我的课题的具体联系，指明相关模块(如M1架构/M2领域预训练/M3微调/KG约束/landing/评测/数据/可对比基线)；若无关就写\\"无关\\"", '
         '"tag": "M1|M2|M3|KG|landing|eval|data|baseline|无关"}'
     )
+    ok = 0
     for p in papers:
         user = (f'标题: {p["title"]}\n作者: {", ".join(p["authors"])}\n'
                 f'来源: {p["venue"]} ({p["date"]})\n摘要: {p["abstract"][:1500]}')
@@ -239,11 +242,13 @@ def llm_annotate(papers):
             p['summary'] = d.get('summary', '')
             p['connection'] = d.get('connection', '')
             p['tag'] = d.get('tag', '')
+            ok += 1
         except Exception as e:
             print(f'  [warn] LLM 调用失败: {p["title"][:50]} | {e}')
             p['score'] = None
         time.sleep(0.6)
-    return papers
+    status = f'正常（{ok}/{len(papers)} 篇完成打分）' if ok else '调用失败（检查 key / base_url / model）'
+    return papers, status
 
 
 # ---------------- 渲染 ----------------
@@ -254,10 +259,11 @@ def pick(kept):
     return hit[:CFG['max_papers']]
 
 
-def render_md(hit, today, total_fetched, total_fresh):
+def render_md(hit, today, total_fetched, total_fresh, llm_status='未知'):
     lines = [f'# 📚 文献日报 {today}', '',
              f'> 采集 {total_fresh} 篇（昨日窗口共 {total_fetched} 条）→ 收录 {len(hit)} 篇'
-             f'｜阈值 {CFG["min_score"]}/10｜上限 {CFG["max_papers"]} 篇', '']
+             f'｜阈值 {CFG["min_score"]}/10｜上限 {CFG["max_papers"]} 篇',
+             f'> AI 总结：**{llm_status}**', '']
     if not hit:
         lines.append('今天没有命中文献。')
     for p in hit:
@@ -279,7 +285,13 @@ def render_md(hit, today, total_fetched, total_fresh):
     return '\n'.join(lines)
 
 
-def render_html(hit, today):
+def render_html(hit, today, llm_status='未知'):
+    good = llm_status.startswith('正常')
+    color = '#2e7d32' if good else '#e65100'
+    bg = '#e8f5e9' if good else '#fff3e0'
+    banner = (f'<div style="padding:8px 12px;border-radius:6px;background:{bg};color:{color};'
+              f'font-size:13px;font-family:sans-serif;margin:8px 0;max-width:720px">'
+              f'<b>AI 总结：{llm_status}</b></div>')
     cards = []
     for p in hit:
         s = p.get('score', '?')
@@ -291,7 +303,7 @@ def render_html(hit, today):
             + (f'<p style="font-size:13px">{p.get("summary","")}</p>' if p.get('summary') else '')
             + (f'<p style="font-size:13px;background:#eef5ff;padding:8px;border-radius:6px"><b>🔗 与课题：</b>{p.get("connection","")}</p>' if p.get('connection') else '')
             + '</div>')
-    return f'<h2>📚 文献日报 {today}（{len(hit)} 篇）</h2>' + ''.join(cards)
+    return f'<h2>📚 文献日报 {today}（{len(hit)} 篇）</h2>' + banner + ''.join(cards)
 
 
 # ---------------- 推送 ----------------
@@ -391,11 +403,11 @@ def main():
     kept = kw_filter(fresh)
     print(f'[粗筛] {len(fresh)} -> {len(kept)}')
 
-    kept = llm_annotate(kept)
+    kept, llm_status = llm_annotate(kept)
     hit = pick(kept)
     print(f'[收录] {len(hit)} 篇')
 
-    md = render_md(hit, today, len(papers), len(fresh))
+    md = render_md(hit, today, len(papers), len(fresh), llm_status)
     os.makedirs(os.path.join(BASE, 'daily'), exist_ok=True)
     out = os.path.join(BASE, 'daily', today + '.md')
     with open(out, 'w', encoding='utf-8') as f:
@@ -408,7 +420,9 @@ def main():
         save_state(state)
         if hit:
             subj = f'📚 文献日报 {today}: {len(hit)} 篇命中'
-            push_email(subj, render_html(hit, today))
+            if not llm_status.startswith('正常'):
+                subj += f'（AI总结{llm_status[:6]}…）'
+            push_email(subj, render_html(hit, today, llm_status))
             push_wechat(f'文献日报 {today}: {len(hit)}篇', md)
         else:
             print('[info] 今日无命中，不推送')
