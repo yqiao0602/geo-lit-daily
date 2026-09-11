@@ -61,12 +61,7 @@ def http_post_json(url, payload, headers, timeout=120):
 
 # ---------------- arXiv ----------------
 
-def fetch_arxiv():
-    cats = CFG['arxiv']['categories']
-    since = date.today() - timedelta(days=CFG['arxiv']['window_days'])
-    until = date.today()
-    cat_q = '(' + ' OR '.join(f'cat:{c}' for c in cats) + ')'
-    q = urllib.parse.quote(f'{cat_q} AND submittedDate:[{since:%Y%m%d}0000 TO {until:%Y%m%d}2359]')
+def fetch_arxiv(since=None):
     ns = {'a': 'http://www.w3.org/2005/Atom'}
 
     def parse(xml_text):
@@ -89,22 +84,35 @@ def fetch_arxiv():
 
     papers = []
     page = 100
-    total = CFG['arxiv']['max_results']
-    for start in range(0, total, page):
-        url = (f'https://export.arxiv.org/api/query?search_query={q}'
-               f'&sortBy=submittedDate&sortOrder=descending&start={start}&max_results={page}')
-        try:
-            chunk = parse(http_get(url, timeout=90))
-        except Exception as e:
-            print(f'  [warn] arXiv 第{start//page+1}页拉取失败: {e}')
-            if not papers:
-                raise
-            print(f'  [info] 保留已抓取的 {len(papers)} 条')
-            break
-        papers += chunk
-        if len(chunk) < page:
-            break
-        time.sleep(3)   # arXiv API 官方要求请求间隔 ≥3s
+    until = date.today()
+    if since is None:
+        cats = CFG['arxiv']['categories']
+        d0 = date.today() - timedelta(days=CFG['arxiv']['window_days'])
+        cat_q = '(' + ' OR '.join(f'cat:{c}' for c in cats) + ')'
+        queries = [f'{cat_q} AND submittedDate:[{d0:%Y%m%d}0000 TO {until:%Y%m%d}2359]']
+        max_each = CFG['arxiv']['max_results']
+    else:
+        queries = [f'all:"{p}" AND submittedDate:[{since:%Y%m%d}0000 TO {until:%Y%m%d}2359]'
+                   for p in CFG['openalex']['search_queries']]
+        max_each = 150
+    for q in queries:
+        qe = urllib.parse.quote(q)
+        for start in range(0, max_each, page):
+            url = (f'https://export.arxiv.org/api/query?search_query={qe}'
+                   f'&sortBy=submittedDate&sortOrder=descending&start={start}&max_results={page}')
+            try:
+                chunk = parse(http_get(url, timeout=90))
+            except Exception as e:
+                print(f'  [warn] arXiv 拉取失败: {str(e)[:90]}')
+                if not papers and len(queries) == 1:
+                    raise
+                break
+            papers += chunk
+            if len(chunk) < page:
+                break
+            time.sleep(3)   # arXiv API 官方要求请求间隔 ≥3s
+        if len(queries) > 1:
+            time.sleep(3)
     return papers
 
 
@@ -120,33 +128,41 @@ def reconstruct_abstract(inv):
     return ' '.join(pos[i] for i in sorted(pos))
 
 
-def fetch_openalex():
+def fetch_openalex(since=None):
     oa = CFG['openalex']
-    since = date.today() - timedelta(days=oa['window_days'])
+    daily = since is None
+    if daily:
+        d0 = date.today() - timedelta(days=oa['window_days'])
+        author_pages, search_pages = 1, 1
+    else:
+        d0 = since
+        author_pages, search_pages = 2, 3
+    datef = f'from_publication_date:{d0:%Y-%m-%d}'
     select = '&select=id,doi,title,publication_date,authorships,primary_location,abstract_inverted_index,ids'
-    base = f'https://api.openalex.org/works?per-page=50&sort=publication_date:desc&mailto={urllib.parse.quote(CFG["mailto"])}'
-    filt = f'&filter=from_publication_date:{since:%Y-%m-%d}'
+    base = f'https://api.openalex.org/works?mailto={urllib.parse.quote(CFG["mailto"])}'
 
     urls = []
-    jids = [j['id'] for j in oa['journals']]
-    if jids:
-        urls.append((f'期刊×{len(jids)}', base + filt + f',primary_location.source.id:{"|".join(jids)}' + select))
+    if daily:
+        jids = [j['id'] for j in oa['journals']]
+        if jids:
+            urls.append((f'期刊×{len(jids)}',
+                         f'{base}&per-page=50&sort=publication_date:desc'
+                         f'&filter={datef},primary_location.source.id:{"|".join(jids)}{select}', 1))
     aids = [a['id'] for a in oa['authors']]
     if aids:
-        urls.append((f'作者×{len(aids)}', base + filt + f',author.id:{"|".join(aids)}' + select))
+        urls.append((f'作者×{len(aids)}',
+                     f'{base}&per-page=50&sort=publication_date:desc'
+                     f'&filter={datef},author.id:{"|".join(aids)}{select}', author_pages))
     for q in oa.get('search_queries', []):
-        urls.append((f'检索:{q}', base + f'&per-page=25&filter=from_publication_date:{since:%Y-%m-%d},default.search:{urllib.parse.quote(q)}' + select))
+        urls.append((f'检索:{q}',
+                     f'{base}&per-page=50&sort=relevance_score:desc'
+                     f'&filter={datef},default.search:{urllib.parse.quote(q)}{select}', search_pages))
 
     name_by_id = {a['id']: a['name'] for a in oa['authors']}
     papers, seen = [], set()
-    for label, url in urls:
-        try:
-            data = json.loads(http_get(url))
-        except Exception as e:
-            print(f'  [warn] OpenAlex {label} 失败: {e}')
-            continue
-        time.sleep(1.5)
-        for w in data.get('results', []):
+
+    def absorb(results):
+        for w in results:
             try:
                 wid = (w.get('id') or '')
                 if not wid:
@@ -172,6 +188,18 @@ def fetch_openalex():
                 })
             except Exception as e:
                 print(f'  [warn] 解析单条记录失败: {e}')
+
+    for label, url, max_pages in urls:
+        for page in range(1, max_pages + 1):
+            try:
+                data = json.loads(http_get(f'{url}&page={page}'))
+            except Exception as e:
+                print(f'  [warn] OpenAlex {label} 第{page}页失败: {e}')
+                break
+            absorb(data.get('results', []))
+            time.sleep(1.5)
+            if len(data.get('results', [])) < 50:
+                break
     return papers
 
 
@@ -306,6 +334,75 @@ def render_html(hit, today, llm_status='未知'):
     return f'<h2>📚 文献日报 {today}（{len(hit)} 篇）</h2>' + banner + ''.join(cards)
 
 
+def render_backlog(hit, since, n_cand, n_scored, llm_status):
+    def block(p):
+        s = p.get('score') or 0
+        lines = [f'### {"⭐" * max(1, round(s / 2))} {p["title"]}',
+                 f'**{s}/10** · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]} · [原文]({p["url"]})']
+        if p.get('why'):
+            lines.append(f'*来源：{p["why"]}*')
+        if p.get('one_line'):
+            lines.append(f'\n**一句话**：{p["one_line"]}')
+        if p.get('summary'):
+            lines.append(f'\n{p["summary"]}')
+        if p.get('connection'):
+            lines.append(f'\n> 🔗 **与课题**：{p["connection"]}')
+        return '\n'.join(lines)
+
+    out = [f'# 📚 存量文献清单（backlog）— 扫描自 {since:%Y-%m-%d}', '',
+           f'> 候选 {n_cand} 篇 → LLM 打分 {n_scored} 篇 → 收录 {len(hit)} 篇'
+           f'｜阈值 {CFG["min_score"]}/10｜AI 总结：{llm_status}', '']
+    bands = [(8, '🔥 8 分以上：直接相关'),
+             (6, '👀 6-7 分：值得一看'),
+             (CFG['min_score'], f'📎 {CFG["min_score"]}-5 分：备查')]
+    covered = 11
+    for lo, title in bands:
+        grp = [p for p in hit if lo <= (p.get('score') or 0) < covered]
+        covered = lo
+        if grp:
+            out += [f'## {title}（{len(grp)} 篇）', '']
+            out += [block(p) + '\n' for p in grp]
+    return '\n'.join(out)
+
+
+def backfill(since):
+    print(f'=== geo-lit-daily BACKLOG 自 {since:%Y-%m-%d} ===')
+    papers = []
+    try:
+        ax = fetch_arxiv(since)
+        print(f'[arXiv 检索式] {len(ax)} 篇')
+        papers += ax
+    except Exception as e:
+        print(f'[warn] arXiv 失败: {e}')
+    try:
+        oa = fetch_openalex(since)
+        print(f'[OpenAlex 作者+检索] {len(oa)} 篇')
+        papers += oa
+    except Exception as e:
+        print(f'[warn] OpenAlex 失败: {e}')
+    seen_titles, uniq = set(), []
+    for p in papers:
+        t = re.sub(r'\W', '', p['title'].lower())[:80]
+        if t and t in seen_titles:
+            continue
+        seen_titles.add(t)
+        uniq.append(p)
+    kept = kw_filter(uniq)
+    print(f'[粗筛] {len(uniq)} -> {len(kept)}')
+    cap = int(CFG.get('backfill', {}).get('max_llm', 400))
+    if len(kept) > cap:
+        kept.sort(key=lambda p: 0 if p.get('author_hit') else 1)
+        print(f'[截断] {len(kept)} 超出 LLM 上限 {cap}，作者跟踪优先，截去 {len(kept) - cap} 篇')
+        kept = kept[:cap]
+    kept, llm_status = llm_annotate(kept)
+    hit = [p for p in kept if (p.get('score') or 0) >= CFG['min_score']]
+    hit.sort(key=lambda p: ((p.get('score') or 0), p.get('date') or ''), reverse=True)
+    md = render_backlog(hit, since, len(uniq), len(kept), llm_status)
+    with open(os.path.join(BASE, 'backlog.md'), 'w', encoding='utf-8') as f:
+        f.write(md)
+    print(f'[ok] backlog.md：收录 {len(hit)} 篇（AI 总结 {llm_status}）')
+
+
 # ---------------- 推送 ----------------
 
 def push_email(subject, html):
@@ -431,4 +528,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if '--backfill' in sys.argv:
+        i = sys.argv.index('--backfill')
+        arg = sys.argv[i + 1] if len(sys.argv) > i + 1 else '2024'
+        backfill(date(int(arg), 1, 1) if arg.isdigit() else date(2024, 1, 1))
+    else:
+        main()

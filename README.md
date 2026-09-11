@@ -15,6 +15,15 @@ pip install -r requirements.txt
 python main.py --dry-run     # 不推送、不写 state.json，产出 daily/当日.md
 ```
 
+## 存量回溯（backfill）
+
+追新系统只覆盖未来文献。要扫历史存量（2024 年以来的漏网论文）：
+
+- **云端（推荐，本机 OpenAlex 常被限流）**：仓库 Actions → backfill → Run workflow → 填起始年（默认 2024），跑完 `backlog.md` 自动提交进仓库
+- 本地：`python main.py --backfill 2024`
+
+说明：检索式驱动（7 组关键词全库扫 arXiv + OpenAlex，作者通道同扫），LLM 逐篇打分后按 8+/6-7/5 分三档写入 `backlog.md`；**不进日报、不影响 state.json**。LLM 调用上限见 `config.yaml` 的 `backfill.max_llm`（默认 400，超出部分作者跟踪优先、其余截断）。一次运行约 30-60 分钟。
+
 ## 部署到 GitHub Actions（一次性）
 
 1. 在 GitHub 上新建空仓库（如 `geo-lit-daily`，私有即可）

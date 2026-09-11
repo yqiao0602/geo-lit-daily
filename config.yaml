@@ -79,6 +79,10 @@ email:
   host: smtp.qq.com     # 环境变量 LIT_SMTP_HOST 覆盖；QQ邮箱 smtp.qq.com:465
   port: 465             # 465=SSL；587=STARTTLS
 
+# ---- 存量回溯（手动一次性任务：python main.py --backfill 2024）----
+backfill:
+  max_llm: 400          # LLM 打分调用上限；超出时作者跟踪优先，其余截断
+
 # ---- 研究画像（注入 LLM prompt，决定打分和"与课题的联系"）----
 profile: |
   课题：根据自然语言任务描述，自动构建可靠、完整、顺序正确、可解释的 QGIS 地理处理工作流（算子链）。
