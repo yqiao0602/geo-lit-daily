@@ -1,0 +1,42 @@
+name: daily
+
+on:
+  schedule:
+    - cron: "30 23 * * *"   # UTC 23:30 = 北京时间 07:30
+  workflow_dispatch: {}     # 支持手动触发
+
+permissions:
+  contents: write           # 允许回写日报和 state.json
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install -r requirements.txt
+
+      - name: 运行日报
+        env:
+          LIT_LLM_API_KEY: ${{ secrets.LIT_LLM_API_KEY }}
+          LIT_LLM_BASE_URL: ${{ secrets.LIT_LLM_BASE_URL }}
+          LIT_LLM_MODEL: ${{ secrets.LIT_LLM_MODEL }}
+          LIT_SMTP_HOST: ${{ secrets.LIT_SMTP_HOST }}
+          LIT_SMTP_PORT: ${{ secrets.LIT_SMTP_PORT }}
+          LIT_SMTP_USER: ${{ secrets.LIT_SMTP_USER }}
+          LIT_SMTP_PASS: ${{ secrets.LIT_SMTP_PASS }}
+          LIT_TO_EMAIL: ${{ secrets.LIT_TO_EMAIL }}
+          LIT_SERVERCHAN_KEY: ${{ secrets.LIT_SERVERCHAN_KEY }}
+        run: python main.py
+
+      - name: 归档日报与去重状态
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add daily state.json
+          git commit -m "digest: $(date -u +%F)" || echo "nothing to commit"
+          git push

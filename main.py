@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""geo-lit-daily：arXiv + OpenAlex 每日文献采集 → 关键词粗筛 → LLM 打分/总结/课题关联 → 日报 → 邮件/微信推送"""
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import date, timedelta
+from email.header import Header
+from email.mime.text import MIMEText
+
+import smtplib
+
+import yaml
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+with open(os.path.join(BASE, 'config.yaml'), encoding='utf-8') as f:
+    CFG = yaml.safe_load(f)
+
+
+def http_get(url, timeout=45, retries=4):
+    last = None
+    for i in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': f'geo-lit-daily ({CFG["mailto"]})'})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode('utf-8', errors='ignore')
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code == 429:
+                time.sleep(20 * (i + 1))
+                continue
+            if e.code >= 500:
+                time.sleep(6 * (i + 1))
+                continue
+            raise
+        except Exception as e:
+            last = e
+            time.sleep(6 * (i + 1))
+    raise last
+
+
+def http_post_json(url, payload, headers, timeout=120):
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, method='POST',
+                                 headers={**headers, 'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+# ---------------- arXiv ----------------
+
+def fetch_arxiv():
+    cats = CFG['arxiv']['categories']
+    since = date.today() - timedelta(days=CFG['arxiv']['window_days'])
+    until = date.today()
+    cat_q = '(' + ' OR '.join(f'cat:{c}' for c in cats) + ')'
+    q = urllib.parse.quote(f'{cat_q} AND submittedDate:[{since:%Y%m%d}0000 TO {until:%Y%m%d}2359]')
+    ns = {'a': 'http://www.w3.org/2005/Atom'}
+
+    def parse(xml_text):
+        root = ET.fromstring(xml_text)
+        out = []
+        for e in root.findall('a:entry', ns):
+            raw = e.find('a:id', ns).text or ''
+            m = re.search(r'abs/(.+)', raw)
+            aid = m.group(1) if m else raw
+            out.append({
+                'id': 'arxiv:' + re.sub(r'v\d+$', '', aid),
+                'title': ' '.join((e.find('a:title', ns).text or '').split()),
+                'abstract': ' '.join((e.find('a:summary', ns).text or '').split()),
+                'authors': [a.find('a:name', ns).text for a in e.findall('a:author', ns)][:6],
+                'venue': 'arXiv',
+                'url': f'https://arxiv.org/abs/{aid}',
+                'date': (e.find('a:published', ns).text or '')[:10],
+            })
+        return out
+
+    papers = []
+    page = 100
+    total = CFG['arxiv']['max_results']
+    for start in range(0, total, page):
+        url = (f'https://export.arxiv.org/api/query?search_query={q}'
+               f'&sortBy=submittedDate&sortOrder=descending&start={start}&max_results={page}')
+        try:
+            chunk = parse(http_get(url, timeout=90))
+        except Exception as e:
+            print(f'  [warn] arXiv 第{start//page+1}页拉取失败: {e}')
+            if not papers:
+                raise
+            print(f'  [info] 保留已抓取的 {len(papers)} 条')
+            break
+        papers += chunk
+        if len(chunk) < page:
+            break
+        time.sleep(3)   # arXiv API 官方要求请求间隔 ≥3s
+    return papers
+
+
+# ---------------- OpenAlex ----------------
+
+def reconstruct_abstract(inv):
+    if not inv:
+        return ''
+    pos = {}
+    for word, places in inv.items():
+        for p in places:
+            pos[p] = word
+    return ' '.join(pos[i] for i in sorted(pos))
+
+
+def fetch_openalex():
+    oa = CFG['openalex']
+    since = date.today() - timedelta(days=oa['window_days'])
+    select = '&select=id,doi,title,publication_date,authorships,primary_location,abstract_inverted_index,ids'
+    base = f'https://api.openalex.org/works?per-page=50&sort=publication_date:desc&mailto={urllib.parse.quote(CFG["mailto"])}'
+    filt = f'&filter=from_publication_date:{since:%Y-%m-%d}'
+
+    urls = []
+    jids = [j['id'] for j in oa['journals']]
+    if jids:
+        urls.append((f'期刊×{len(jids)}', base + filt + f',primary_location.source.id:{"|".join(jids)}' + select))
+    aids = [a['id'] for a in oa['authors']]
+    if aids:
+        urls.append((f'作者×{len(aids)}', base + filt + f',author.id:{"|".join(aids)}' + select))
+    for q in oa.get('search_queries', []):
+        urls.append((f'检索:{q}', base + f'&per-page=25&filter=from_publication_date:{since:%Y-%m-%d},default.search:{urllib.parse.quote(q)}' + select))
+
+    name_by_id = {a['id']: a['name'] for a in oa['authors']}
+    papers, seen = [], set()
+    for label, url in urls:
+        try:
+            data = json.loads(http_get(url))
+        except Exception as e:
+            print(f'  [warn] OpenAlex {label} 失败: {e}')
+            continue
+        time.sleep(1.5)
+        for w in data.get('results', []):
+            try:
+                wid = (w.get('id') or '')
+                if not wid:
+                    continue
+                wid = wid.split('/')[-1]
+                if wid in seen:
+                    continue
+                seen.add(wid)
+                ax = (w.get('ids') or {}).get('arxiv') or ''
+                pid = 'arxiv:' + ax.rsplit('/', 1)[-1] if ax else 'oa:' + wid
+                auth_ids = {(a['author'].get('id') or '').split('/')[-1]
+                            for a in w.get('authorships', []) if a.get('author')}
+                hit = [n for i in auth_ids if (n := name_by_id.get(i))]
+                papers.append({
+                    'id': pid,
+                    'title': w.get('title') or '(无题)',
+                    'abstract': reconstruct_abstract(w.get('abstract_inverted_index')),
+                    'authors': [a['author'].get('display_name', '?') for a in w.get('authorships', [])][:6],
+                    'venue': ((w.get('primary_location') or {}).get('source') or {}).get('display_name') or '预印本',
+                    'url': w.get('doi') or f'https://openalex.org/{wid}',
+                    'date': w.get('publication_date') or '',
+                    'author_hit': hit,
+                })
+            except Exception as e:
+                print(f'  [warn] 解析单条记录失败: {e}')
+    return papers
+
+
+# ---------------- 关键词粗筛 ----------------
+
+def make_matcher(term):
+    if len(term) <= 4 and re.fullmatch(r'[a-z0-9\-]+', term):
+        return re.compile(r'\b' + re.escape(term) + r'\b', re.I)
+    return re.compile(re.escape(term), re.I)
+
+
+def kw_filter(papers):
+    D = [make_matcher(t) for t in CFG['filter']['domain_terms']]
+    T = [make_matcher(t) for t in CFG['filter']['task_terms']]
+    S = [make_matcher(t) for t in CFG['filter']['strong_terms']]
+    kept = []
+    for p in papers:
+        if p.get('author_hit'):
+            p['why'] = '作者跟踪: ' + ', '.join(p['author_hit'])
+            kept.append(p)
+            continue
+        text = (p['title'] + ' ' + p['abstract']).lower()
+        if any(r.search(text) for r in S):
+            p['why'] = '强命中'
+            kept.append(p)
+            continue
+        if any(r.search(text) for r in D) and any(r.search(text) for r in T):
+            p['why'] = '领域×任务'
+            kept.append(p)
+    return kept
+
+
+# ---------------- LLM ----------------
+
+def llm_annotate(papers):
+    key = os.environ.get('LIT_LLM_API_KEY', '')
+    base = os.environ.get('LIT_LLM_BASE_URL', CFG['llm'].get('base_url', ''))
+    model = os.environ.get('LIT_LLM_MODEL', CFG['llm'].get('model', ''))
+    if not (key and base and model):
+        print('[info] 未配置 LIT_LLM_API_KEY，跳过 LLM 打分（仅关键词粗筛）')
+        return papers
+    sys_prompt = (
+        '你是科研文献筛选助手。我的研究方向如下：\n' + CFG['profile'].strip() + '\n\n'
+        '下面给你一篇论文的标题与摘要，请只输出一个 JSON 对象，不要输出任何其他文字：\n'
+        '{"score": 0到10的整数(与课题相关性), "one_line": "一句话概括论文做了什么(中文)", '
+        '"summary": "2-3句中文总结(痛点/方法/结果)", '
+        '"connection": "与我的课题的具体联系，指明相关模块(如M1架构/M2领域预训练/M3微调/KG约束/landing/评测/数据/可对比基线)；若无关就写\\"无关\\"", '
+        '"tag": "M1|M2|M3|KG|landing|eval|data|baseline|无关"}'
+    )
+    for p in papers:
+        user = (f'标题: {p["title"]}\n作者: {", ".join(p["authors"])}\n'
+                f'来源: {p["venue"]} ({p["date"]})\n摘要: {p["abstract"][:1500]}')
+        try:
+            r = http_post_json(
+                base.rstrip('/') + '/chat/completions',
+                {'model': model, 'temperature': 0.2,
+                 'messages': [{'role': 'system', 'content': sys_prompt},
+                              {'role': 'user', 'content': user}]},
+                {'Authorization': 'Bearer ' + key})
+            txt = r['choices'][0]['message']['content']
+            m = re.search(r'\{.*\}', txt, re.S)
+            d = json.loads(m.group(0)) if m else {}
+            p['score'] = int(d.get('score') or 0)
+            p['one_line'] = d.get('one_line', '')
+            p['summary'] = d.get('summary', '')
+            p['connection'] = d.get('connection', '')
+            p['tag'] = d.get('tag', '')
+        except Exception as e:
+            print(f'  [warn] LLM 调用失败: {p["title"][:50]} | {e}')
+            p['score'] = None
+        time.sleep(0.6)
+    return papers
+
+
+# ---------------- 渲染 ----------------
+
+def pick(kept):
+    hit = [p for p in kept if p.get('score') is None or p.get('score', 0) >= CFG['min_score']]
+    hit.sort(key=lambda p: p.get('score') or 0, reverse=True)
+    return hit[:CFG['max_papers']]
+
+
+def render_md(hit, today, total_fetched, total_fresh):
+    lines = [f'# 📚 文献日报 {today}', '',
+             f'> 采集 {total_fresh} 篇（昨日窗口共 {total_fetched} 条）→ 收录 {len(hit)} 篇'
+             f'｜阈值 {CFG["min_score"]}/10｜上限 {CFG["max_papers"]} 篇', '']
+    if not hit:
+        lines.append('今天没有命中文献。')
+    for p in hit:
+        s = p.get('score')
+        stars = '⭐' * max(1, round((s or 5) / 2)) if s is not None else '▫️'
+        lines.append(f'## {stars} {p["title"]}')
+        meta = f'**{s if s is not None else "-"}/10** · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]}'
+        lines.append(meta + f' · [原文]({p["url"]})')
+        if p.get('why'):
+            lines.append(f'*入选：{p["why"]}*')
+        if p.get('one_line'):
+            lines.append(f'\n**一句话**：{p["one_line"]}')
+        if p.get('summary'):
+            lines.append(f'\n{p["summary"]}')
+        if p.get('connection'):
+            lines.append(f'\n> 🔗 **与课题**：{p["connection"]}')
+        lines.append('')
+    lines.append('---\n*geo-lit-daily 自动生成*')
+    return '\n'.join(lines)
+
+
+def render_html(hit, today):
+    cards = []
+    for p in hit:
+        s = p.get('score', '?')
+        cards.append(
+            f'<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin:12px 0;font-family:sans-serif;max-width:720px">'
+            f'<h3 style="margin:0 0 6px"><a href="{p["url"]}">{p["title"]}</a></h3>'
+            f'<div style="color:#888;font-size:12px">{s}/10 · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]}</div>'
+            + (f'<p style="font-size:13px"><b>一句话：</b>{p.get("one_line","")}</p>' if p.get('one_line') else '')
+            + (f'<p style="font-size:13px">{p.get("summary","")}</p>' if p.get('summary') else '')
+            + (f'<p style="font-size:13px;background:#eef5ff;padding:8px;border-radius:6px"><b>🔗 与课题：</b>{p.get("connection","")}</p>' if p.get('connection') else '')
+            + '</div>')
+    return f'<h2>📚 文献日报 {today}（{len(hit)} 篇）</h2>' + ''.join(cards)
+
+
+# ---------------- 推送 ----------------
+
+def push_email(subject, html):
+    host = os.environ.get('LIT_SMTP_HOST', CFG['email']['host'])
+    port = int(os.environ.get('LIT_SMTP_PORT', str(CFG['email']['port'])))
+    user = os.environ.get('LIT_SMTP_USER', '')
+    pwd = os.environ.get('LIT_SMTP_PASS', '')
+    to = os.environ.get('LIT_TO_EMAIL', '')
+    if not all([user, pwd, to]):
+        print('[info] 邮件未配置，跳过')
+        return
+    msg = MIMEText(html, 'html', 'utf-8')
+    msg['Subject'] = Header(subject, 'utf-8')
+    msg['From'] = user
+    msg['To'] = to
+    smtp = smtplib.SMTP_SSL(host, port) if port == 465 else smtplib.SMTP(host, port)
+    try:
+        if port != 465:
+            smtp.starttls()
+        smtp.login(user, pwd)
+        smtp.sendmail(user, [to], msg.as_string())
+        print(f'[ok] 邮件已发送 -> {to}')
+    finally:
+        smtp.quit()
+
+
+def push_wechat(title, md):
+    key = os.environ.get('LIT_SERVERCHAN_KEY', '')
+    if not key:
+        print('[info] Server酱未配置，跳过')
+        return
+    data = urllib.parse.urlencode({'title': title[:32], 'desp': md[:28000]}).encode()
+    req = urllib.request.Request(f'https://sctapi.ftqq.com/{key}.send', data=data)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        print('[ok] Server酱:', json.loads(r.read().decode()).get('message'))
+
+
+# ---------------- 状态 ----------------
+
+STATE_FILE = os.path.join(BASE, 'state.json')
+
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            return json.load(open(STATE_FILE, encoding='utf-8'))
+        except Exception:
+            pass
+    return {'seen': {}}
+
+
+def save_state(state):
+    cutoff = (date.today() - timedelta(days=90)).isoformat()
+    state['seen'] = {k: v for k, v in state['seen'].items() if v >= cutoff}
+    with open(STATE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(state, f, ensure_ascii=False, indent=0)
+
+
+def main():
+    dry = '--dry-run' in sys.argv
+    today = date.today().isoformat()
+    print(f'=== geo-lit-daily {today} {"(dry-run)" if dry else ""} ===')
+
+    papers = []
+    try:
+        ax = fetch_arxiv()
+        print(f'[arXiv] 4 类目 {CFG["arxiv"]["window_days"]} 天: {len(ax)} 篇')
+        papers += ax
+    except Exception as e:
+        print(f'[warn] arXiv 拉取失败: {e}')
+    try:
+        oa = fetch_openalex()
+        print(f'[OpenAlex] 期刊+作者+检索: {len(oa)} 篇')
+        papers += oa
+    except Exception as e:
+        print(f'[warn] OpenAlex 拉取失败: {e}')
+    if not papers:
+        print('[error] 两个数据源均失败，退出')
+        sys.exit(1)
+
+    # 标题级去重（跨源同一篇）
+    seen_titles, uniq = set(), []
+    for p in papers:
+        t = re.sub(r'\W', '', p['title'].lower())[:80]
+        if t and t in seen_titles:
+            continue
+        seen_titles.add(t)
+        uniq.append(p)
+    papers = uniq
+
+    state = load_state()
+    fresh = [p for p in papers if p['id'] not in state['seen']]
+    print(f'[去重] {len(papers)} -> 新增 {len(fresh)}')
+
+    kept = kw_filter(fresh)
+    print(f'[粗筛] {len(fresh)} -> {len(kept)}')
+
+    kept = llm_annotate(kept)
+    hit = pick(kept)
+    print(f'[收录] {len(hit)} 篇')
+
+    md = render_md(hit, today, len(papers), len(fresh))
+    os.makedirs(os.path.join(BASE, 'daily'), exist_ok=True)
+    out = os.path.join(BASE, 'daily', today + '.md')
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write(md)
+    print(f'[ok] 日报: {out}')
+
+    if not dry:
+        for p in papers:
+            state['seen'][p['id']] = today
+        save_state(state)
+        if hit:
+            subj = f'📚 文献日报 {today}: {len(hit)} 篇命中'
+            push_email(subj, render_html(hit, today))
+            push_wechat(f'文献日报 {today}: {len(hit)}篇', md)
+        else:
+            print('[info] 今日无命中，不推送')
+    else:
+        print('[dry-run] 不更新 state.json、不推送')
+
+
+if __name__ == '__main__':
+    main()

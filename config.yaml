@@ -1,0 +1,93 @@
+# geo-lit-daily 配置
+# 注意：敏感信息（API key、SMTP 密码、Server酱 key）一律不写在这里，
+#       通过环境变量 / GitHub Secrets 注入（见 README.md）。
+
+mailto: lit-daily@example.com   # 建议改成自己邮箱，进 OpenAlex polite pool
+
+# 收录控制
+min_score: 5        # LLM 相关性阈值（0-10）
+max_papers: 15      # 日报最多收录篇数
+
+# ---- 数据源 1：arXiv 预印本 ----
+arxiv:
+  window_days: 2    # 抓最近 2 天提交的论文（跨周末不漏）
+  max_results: 600
+  categories: [cs.AI, cs.CL, cs.LG, cs.SE]
+
+# ---- 数据源 2：OpenAlex 期刊 + 作者 + 关键词检索 ----
+openalex:
+  window_days: 5    # 期刊索引有滞后，窗口放宽，靠 state.json 去重
+  journals:         # 期刊新文（source id 已核验）
+    - {id: S111872859,  name: IJGIS}
+    - {id: S859791518,  name: Transactions in GIS}
+    - {id: S2764431341, name: ISPRS IJGI}
+    - {id: S4210179989, name: Int J Appl Earth Obs (JAG)}
+    - {id: S61699894,   name: Computers & Geosciences}
+    - {id: S113611870,  name: Env Modelling & Software}
+    - {id: S198914822,  name: Earth Science Informatics}
+    - {id: S4210168194, name: GeoInformatica}
+    - {id: S4210199948, name: Annals of GIS}
+    - {id: S36798160,   name: Geo-spatial Information Science}
+    - {id: S60115552,   name: CEUS}
+    - {id: S189706386,  name: CaGIS}
+  authors:          # 作者新文（id 已通过 ORCID/已知论文双重核验）
+    - {id: A5110860664, name: 侯舒扬 Hou Shuyang}
+    - {id: A5135579908, name: Hou Shuyang(碎片)}
+    - {id: A5110930512, name: Krzysztof Janowicz}
+    - {id: A5103035722, name: Krzysztof Janowicz(碎片)}
+    - {id: A5005042481, name: Yingjie Hu}
+    - {id: A5036007312, name: Gengchen Mai}
+    - {id: A5101938899, name: Song Gao}
+    - {id: A5100338179, name: Wenwen Li}
+    - {id: A5073915674, name: Zhenlong Li}
+    - {id: A5067070198, name: Grant McKenzie}
+    - {id: A5077311323,  name: Bo Yan}
+    - {id: A5082809671,  name: Rui Zhu}
+  search_queries:   # 全库关键词检索（兜底：会议论文/不在上述期刊的文献）
+    - "geospatial code generation"
+    - "GIS large language model"
+    - "geoprocessing workflow"
+    - "GIS agent"
+    - "geographic question answering"
+    - "spatially explicit machine learning"
+
+# ---- 关键词粗筛（省 LLM token 的第一道闸）----
+# 规则：命中 strong 任一 → 收；或 命中 domain≥1 且 task≥1 → 收
+filter:
+  domain_terms: [geospatial, gis, qgis, arcgis, arcpy, google earth engine, earth engine,
+                 remote sensing, earth observation, geographic, geography, spatial data,
+                 spatially explicit, geo-, geoprocess, mapping, cartograph, land cover,
+                 land use, satellite, lidar, terrain, earth science, geoai]
+  task_terms: [code generation, code synthesis, program synthesis, workflow, operator,
+               toolchain, agent, llm, large language model, foundation model, fine-tun,
+               instruction tun, prompt, model builder, knowledge graph, ontology,
+               chain-of-thought, retrieval-augmented, rag, copilot, chatbot, hallucinat,
+               natural language, text-to-, automation, script, geo-question, question answering]
+  strong_terms: [geospatial code, gis copilot, earth engine, qgis, geoprocessing workflow,
+                 spatial workflow, gis agent, geoai, geospatial agent, geographic question,
+                 nl2gis, gis large language]
+
+# ---- LLM（OpenAI 兼容协议；密钥走环境变量 LIT_LLM_API_KEY）----
+llm:
+  base_url: https://api.deepseek.com/v1   # 环境变量 LIT_LLM_BASE_URL 可覆盖
+  model: deepseek-chat                    # 环境变量 LIT_LLM_MODEL 可覆盖
+
+# ---- 邮件（密钥走环境变量；此处只放非敏感默认值）----
+email:
+  host: smtp.qq.com     # 环境变量 LIT_SMTP_HOST 覆盖；QQ邮箱 smtp.qq.com:465
+  port: 465             # 465=SSL；587=STARTTLS
+
+# ---- 研究画像（注入 LLM prompt，决定打分和"与课题的联系"）----
+profile: |
+  课题：根据自然语言任务描述，自动构建可靠、完整、顺序正确、可解释的 QGIS 地理处理工作流（算子链）。
+  架构要点：
+  - L3：平台无关的"操作原语"中间表示（类似编译器 IR），GEE/QGIS 算子映射到统一语义层
+  - M1 路线：自研模型 = BERT 文本编码 + Transformer 自回归解码器 + FiLM 条件调制
+    + 知识图谱约束解码（转移合法性矩阵、I/O 类型约束）+ 分级回退修复
+  - M2 路线：Qwen3.5-9B-Base 领域继续预训练(DAPT) + 领域指令 SFT + 过程监督/偏好后训练
+  - M3 路线：官方后训练模型的任务级 QLoRA 微调基线
+  - 评估：三层——L3 规划 / L3→QGIS landing / 最终工作流人工可用率
+  关注技术词：geospatial code generation、GIS agent/copilot、NL2Code、工具调用、
+  workflow 自动构建、neuro-symbolic、知识图谱增强生成、RAG、constrained decoding、
+  intermediate representation、DPO、GIS 评测基准、GEE/QGIS/ArcGIS 自动化。
+  期刊论文若涉及 GIS 语义工作流、本体、地理知识图谱、地理问答，也算相关。
