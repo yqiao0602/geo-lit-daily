@@ -395,6 +395,9 @@ def backfill(since):
         print(f'[截断] {len(kept)} 超出 LLM 上限 {cap}，作者跟踪优先，截去 {len(kept) - cap} 篇')
         kept = kept[:cap]
     kept, llm_status = llm_annotate(kept)
+    scored = sorted((p['score'] for p in kept if p.get('score') is not None), reverse=True)
+    if scored:
+        print(f'[LLM] {llm_status} | 全部分数(降序): {scored[:15]}')
     hit = [p for p in kept if (p.get('score') or 0) >= CFG['min_score']]
     hit.sort(key=lambda p: ((p.get('score') or 0), p.get('date') or ''), reverse=True)
     md = render_backlog(hit, since, len(uniq), len(kept), llm_status)
@@ -501,6 +504,9 @@ def main():
     print(f'[粗筛] {len(fresh)} -> {len(kept)}')
 
     kept, llm_status = llm_annotate(kept)
+    scored = sorted((p['score'] for p in kept if p.get('score') is not None), reverse=True)
+    if scored:
+        print(f'[LLM] {llm_status} | 全部分数(降序): {scored[:15]}')
     hit = pick(kept)
     print(f'[收录] {len(hit)} 篇')
 
