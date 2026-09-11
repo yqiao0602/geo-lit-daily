@@ -34,8 +34,8 @@ git push -u origin main
 | Secret 名 | 值 | 说明 |
 |---|---|---|
 | `LIT_LLM_API_KEY` | sk-xxx | LLM 密钥（DeepSeek/GLM/Qwen 等任意 OpenAI 兼容服务） |
-| `LIT_LLM_BASE_URL` | `https://api.deepseek.com/v1` | 与密钥配套的接口地址 |
-| `LIT_LLM_MODEL` | `deepseek-chat` | 模型名 |
+| `LIT_LLM_BASE_URL` | `https://api.deepseek.com` | 与密钥配套的接口地址（DeepSeek 带不带 `/v1` 均可） |
+| `LIT_LLM_MODEL` | `deepseek-flash` | 模型名（2026-09 DeepSeek 在售：deepseek-flash；GLM 示例：glm-4.6） |
 | `LIT_SMTP_HOST` | `smtp.qq.com` | 发件邮箱 SMTP（QQ/163 均可） |
 | `LIT_SMTP_PORT` | `465` | QQ/163 用 465 |
 | `LIT_SMTP_USER` | xxx@qq.com | 发件邮箱地址 |

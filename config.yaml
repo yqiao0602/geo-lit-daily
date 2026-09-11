@@ -69,8 +69,8 @@ filter:
 
 # ---- LLM（OpenAI 兼容协议；密钥走环境变量 LIT_LLM_API_KEY）----
 llm:
-  base_url: https://api.deepseek.com/v1   # 环境变量 LIT_LLM_BASE_URL 可覆盖
-  model: deepseek-chat                    # 环境变量 LIT_LLM_MODEL 可覆盖
+  base_url: https://api.deepseek.com   # 环境变量 LIT_LLM_BASE_URL 可覆盖（带不带 /v1 均可）
+  model: deepseek-flash                # 2026-09 DeepSeek 在售模型：deepseek-flash (V4.1)
 
 # ---- 邮件（密钥走环境变量；此处只放非敏感默认值）----
 email:
