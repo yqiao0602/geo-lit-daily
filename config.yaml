@@ -53,7 +53,8 @@ openalex:
     - "geospatial tool"
 
 # ---- 关键词粗筛（省 LLM token 的第一道闸）----
-# 规则：命中 strong 任一 → 收；或 命中 domain≥1 且 task≥1 → 收
+# 规则：命中 strong 任一 → 收；或 命中 domain≥1 且 task≥1 → 收；
+#       或 命中 rl≥1 且 method_target≥1 → 收（RL/PEFT × 代码/工具/工作流交叉，不要求 GIS 词汇）
 filter:
   domain_terms: [geospatial, gis, qgis, arcgis, arcpy, google earth engine, earth engine,
                  remote sensing, earth observation, geographic, geography, spatial data,
@@ -64,10 +65,18 @@ filter:
                language model, foundation model, fine-tun, instruction tun, prompt,
                model builder, knowledge graph, ontology, chain-of-thought,
                retrieval-augmented, rag, copilot, chatbot, hallucinat, natural language,
-               text-to-, automation, script, geo-question, question answering]
+               text-to-, automation, script, geo-question, question answering,
+               lora, qlora, peft, parameter-efficient, structured output,
+               constrained decoding, self-correct, self-refine, self-debug]
   strong_terms: [geospatial code, gis copilot, earth engine, qgis, geoprocessing workflow,
                  spatial workflow, gis agent, geoai, geospatial agent, geographic question,
                  nl2gis, gis large language, geospatial tool, gis tool, geoagent]
+  rl_terms: [reinforcement learning, rlhf, grpo, dpo, ppo, preference optimization,
+             preference learning, reward model, process reward, verifiable reward,
+             reinforcement fine-tuning, policy optimization, self-play]
+  method_target_terms: [code generation, program synthesis, tool use, tool calling,
+                        tool call, agent, workflow, structured output,
+                        constrained decoding, planning]
 
 # ---- LLM（OpenAI 兼容协议；密钥走环境变量 LIT_LLM_API_KEY）----
 llm:
@@ -95,5 +104,8 @@ profile: |
   - 评估：三层——L3 规划 / L3→QGIS landing / 最终工作流人工可用率
   关注技术词：geospatial code generation、GIS agent/copilot、NL2Code、工具调用、
   workflow 自动构建、neuro-symbolic、知识图谱增强生成、RAG、constrained decoding、
-  intermediate representation、DPO、GIS 评测基准、GEE/QGIS/ArcGIS 自动化。
+  intermediate representation、GIS 评测基准、GEE/QGIS/ArcGIS 自动化。
+  方法侧同等关注（即使不涉及 GIS）：强化学习/偏好后训练（GRPO、DPO、RLHF、过程奖励 PRM、
+  可验证奖励 RLVR、rejection sampling）、参数高效微调（LoRA/QLoRA/PEFT 变体）、
+  约束解码与结构化输出、过程监督——这些用于 M2 后训练与 M3 微调路线设计。
   期刊论文若涉及 GIS 语义工作流、本体、地理知识图谱、地理问答，也算相关。

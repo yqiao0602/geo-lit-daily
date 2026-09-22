@@ -51,12 +51,45 @@ def http_get(url, timeout=45, retries=4):
     raise last
 
 
-def http_post_json(url, payload, headers, timeout=120):
+def http_post_json(url, payload, headers, timeout=120, retries=3):
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, method='POST',
-                                 headers={**headers, 'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
+    last = None
+    for i in range(retries):
+        try:
+            req = urllib.request.Request(url, data=data, method='POST',
+                                         headers={**headers, 'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code == 429 or e.code >= 500:
+                time.sleep(8 * (i + 1))
+                continue
+            raise
+        except Exception as e:
+            last = e
+            time.sleep(5 * (i + 1))
+    raise last
+
+
+def parse_llm_json(txt):
+    """容错解析 LLM 输出中的 JSON：剥代码围栏、按配对花括号截取"""
+    txt = (txt or '').strip()
+    txt = re.sub(r'^```[a-zA-Z]*\s*', '', txt)
+    txt = re.sub(r'```\s*$', '', txt)
+    m = re.search(r'\{', txt)
+    if not m:
+        raise ValueError('输出中无 JSON')
+    depth = 0
+    for i in range(m.start(), len(txt)):
+        c = txt[i]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                return json.loads(txt[m.start():i + 1])
+    raise ValueError('JSON 不完整')
 
 
 # ---------------- arXiv ----------------
@@ -216,6 +249,8 @@ def kw_filter(papers):
     D = [make_matcher(t) for t in CFG['filter']['domain_terms']]
     T = [make_matcher(t) for t in CFG['filter']['task_terms']]
     S = [make_matcher(t) for t in CFG['filter']['strong_terms']]
+    R = [make_matcher(t) for t in CFG['filter'].get('rl_terms', [])]
+    M = [make_matcher(t) for t in CFG['filter'].get('method_target_terms', [])]
     kept = []
     for p in papers:
         if p.get('author_hit'):
@@ -225,6 +260,10 @@ def kw_filter(papers):
         text = (p['title'] + ' ' + p['abstract']).lower()
         if any(r.search(text) for r in S):
             p['why'] = '强命中'
+            kept.append(p)
+            continue
+        if any(r.search(text) for r in R) and any(m.search(text) for m in M):
+            p['why'] = 'RL×LLM方法'
             kept.append(p)
             continue
         if any(r.search(text) for r in D) and any(r.search(text) for r in T):
@@ -248,7 +287,9 @@ def llm_annotate(papers):
         '你是科研文献筛选助手。我的研究方向如下：\n' + CFG['profile'].strip() + '\n\n'
         '打分校准（严格遵守）：只把「以 GIS/地理处理工作流、算子链、地理空间代码或工具调用的'
         '自动化生成本身作为研究对象」的论文判为高分（方法/模型/系统/基准 8-10，其直接支撑技术'
-        '如 KG 约束生成、约束解码、领域微调、评测协议、工作流中间表示 5-7）。'
+        '如 KG 约束生成、约束解码、领域微调、评测协议、工作流中间表示，以及面向代码生成/'
+        '工具调用/工作流/智能体的 RL 与偏好后训练（GRPO/DPO/过程奖励/可验证奖励）、'
+        '参数高效微调（LoRA/QLoRA/PEFT）判 5-7）。'
         '凡是「把 GIS/遥感/空间分析仅仅当作工具去解决其他领域问题」的应用论文'
         '（如考古、碳封存、选址、生态、农业、城市治理、灾害评估等），无论 GIS 用得多深，一律 0-2 分。\n\n'
         '下面给你一篇论文的标题与摘要，请只输出一个 JSON 对象，不要输出任何其他文字：\n'
@@ -258,35 +299,53 @@ def llm_annotate(papers):
         '"inspiration": "这篇论文能给课题带来的新启发或可直接偷的具体做法(1-2句)；没有则写\\"无\\"", '
         '"limitation": "论文自身局限或引用时注意点(1句)", '
         '"action": "精读|对比基线|引用|略读|忽略 之一", '
-        '"tag": "M1|M2|M3|KG|landing|eval|data|baseline|综述|无关 之一"}'
+        '"tag": "M1|M2|M3|rl|KG|landing|eval|data|baseline|综述|无关 之一，其中 rl 表示强化学习/偏好优化/参数高效微调等训练方法"}'
     )
     ok = 0
-    for p in papers:
+
+    def annotate_one(p):
         user = (f'标题: {p["title"]}\n作者: {", ".join(p["authors"])}\n'
                 f'来源: {p["venue"]} ({p["date"]})\n摘要: {p["abstract"][:1500]}')
+        r = http_post_json(
+            base.rstrip('/') + '/chat/completions',
+            {'model': model, 'temperature': 0.2,
+             'messages': [{'role': 'system', 'content': sys_prompt},
+                          {'role': 'user', 'content': user}]},
+            {'Authorization': 'Bearer ' + key})
+        txt = r['choices'][0]['message']['content']
+        d = parse_llm_json(txt)
+        raw = d.get('score')
+        p['score'] = int(float(raw)) if raw is not None else 0
+        p['one_line'] = d.get('one_line', '')
+        p['summary'] = d.get('summary', '')
+        p['connection'] = d.get('connection', '')
+        p['inspiration'] = d.get('inspiration', '')
+        p['limitation'] = d.get('limitation', '')
+        p['action'] = d.get('action', '')
+        p['tag'] = d.get('tag', '')
+
+    for p in papers:
         try:
-            r = http_post_json(
-                base.rstrip('/') + '/chat/completions',
-                {'model': model, 'temperature': 0.2,
-                 'messages': [{'role': 'system', 'content': sys_prompt},
-                              {'role': 'user', 'content': user}]},
-                {'Authorization': 'Bearer ' + key})
-            txt = r['choices'][0]['message']['content']
-            m = re.search(r'\{.*\}', txt, re.S)
-            d = json.loads(m.group(0)) if m else {}
-            p['score'] = int(d.get('score') or 0)
-            p['one_line'] = d.get('one_line', '')
-            p['summary'] = d.get('summary', '')
-            p['connection'] = d.get('connection', '')
-            p['inspiration'] = d.get('inspiration', '')
-            p['limitation'] = d.get('limitation', '')
-            p['action'] = d.get('action', '')
-            p['tag'] = d.get('tag', '')
+            annotate_one(p)
             ok += 1
         except Exception as e:
-            print(f'  [warn] LLM 调用失败: {p["title"][:50]} | {e}')
+            print(f'  [warn] LLM 调用失败: {p["title"][:50]} | {str(e)[:120]}')
             p['score'] = None
-        time.sleep(0.6)
+        time.sleep(1.0)
+
+    # 二次补打：瞬时限流/网络问题多数能在收尾后恢复
+    failed = [p for p in papers if p.get('score') is None]
+    if failed:
+        time.sleep(10)
+        print(f'[info] 二次补打 {len(failed)} 篇未评分论文...')
+        for p in failed:
+            try:
+                annotate_one(p)
+                ok += 1
+                print(f'  [ok] 补打成功: {p["title"][:50]}')
+            except Exception as e:
+                print(f'  [warn] 补打仍失败: {p["title"][:50]} | {str(e)[:120]}')
+            time.sleep(2.0)
     status = f'正常（{ok}/{len(papers)} 篇完成打分）' if ok else '调用失败（检查 key / base_url / model）'
     return papers, status
 
@@ -326,6 +385,7 @@ GROUPS = [('baseline', '🎯 直接竞品与对比基线'),
           ('M1', '🧩 M1 · 自研架构'),
           ('M2', '🎓 M2 · 领域继续预训练与后训练'),
           ('M3', '⚡ M3 · 任务级微调'),
+          ('rl', '🧪 训练方法 · RL/偏好/微调'),
           ('KG', '🕸️ 知识图谱与约束'),
           ('landing', '🛬 Landing 与工具落地'),
           ('eval', '📏 评测与基准'),
@@ -348,6 +408,8 @@ def _card_md(p):
              f'**{s if s is not None else "-"}/10** · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]} · {_links_md(p)}']
     if p.get('why'):
         lines.append(f'*入选：{p["why"]}*')
+    if p.get('abstract'):
+        lines.append(f'\n> 📄 **摘要**：{p["abstract"]}')
     if p.get('one_line'):
         lines.append(f'\n**一句话**：{p["one_line"]}')
     if p.get('summary'):
@@ -396,6 +458,12 @@ def _card_html(p):
     rows = (f'<h3 style="margin:0 0 6px"><a href="{p["url"]}">{p["title"]}</a></h3>'
             f'<div style="color:#888;font-size:12px">{s}/10 · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]}'
             f' · <a href="{p["url"]}">原文</a>{pdf}</div>')
+    if p.get('why'):
+        rows += f'<p style="font-size:12px;color:#999;font-style:italic">*入选：{p["why"]}*</p>'
+    if p.get('abstract'):
+        rows += (f'<p style="font-size:12.5px;color:#444;background:#fafafa;'
+                 f'border-left:3px solid #ccc;padding:8px 10px;margin:8px 0">'
+                 f'<b>📄 摘要：</b>{p["abstract"]}</p>')
     if p.get('one_line'):
         rows += f'<p style="font-size:13px"><b>一句话：</b>{p["one_line"]}</p>'
     if p.get('summary'):
