@@ -7,6 +7,7 @@ mailto: lit-daily@example.com   # 建议改成自己邮箱，进 OpenAlex polite
 # 收录控制
 min_score: 5        # LLM 相关性阈值（0-10）
 max_papers: 15      # 日报最多收录篇数
+hot_score: 8        # ≥此分数视为"强相关"：卡片高亮 + 重视提示 + 邮件标题加 🔥
 
 # ---- 数据源 1：arXiv 预印本 ----
 arxiv:

@@ -295,9 +295,11 @@ def llm_annotate(papers):
         '下面给你一篇论文的标题与摘要，请只输出一个 JSON 对象，不要输出任何其他文字：\n'
         '{"score": 0到10的整数(与课题相关性), "one_line": "一句话概括论文做了什么(中文)", '
         '"summary": "2-3句中文总结(痛点/方法/结果)", '
-        '"connection": "与我的课题的具体联系，指明相关模块(如M1架构/M2领域预训练/M3微调/KG约束/landing/评测/数据/可对比基线)；若无关就写\\"无关\\"", '
+        '"connection": "与我的课题的具体联系，指明相关模块(如M1架构/M2领域预训练/M3微调/KG约束/landing/评测/数据/可对比基线)；若无关就写\\"无关\\"。'
+        '若 score>=8，connection 必须写成逐模块详细对照(4-6句)，summary 也写满3句", '
         '"inspiration": "这篇论文能给课题带来的新启发或可直接偷的具体做法(1-2句)；没有则写\\"无\\"", '
         '"limitation": "论文自身局限或引用时注意点(1句)", '
+        '"why_urgent": "仅当 score>=8 时必填：2-3 句说明为什么这篇必须立即重视——是竞品动向/与某条路线撞车/有可直接借用的方法或协议；其余情况写\\"\\"", '
         '"action": "精读|对比基线|引用|略读|忽略 之一", '
         '"tag": "M1|M2|M3|rl|KG|landing|eval|data|baseline|综述|无关 之一，其中 rl 表示强化学习/偏好优化/参数高效微调等训练方法"}'
     )
@@ -321,6 +323,7 @@ def llm_annotate(papers):
         p['connection'] = d.get('connection', '')
         p['inspiration'] = d.get('inspiration', '')
         p['limitation'] = d.get('limitation', '')
+        p['why_urgent'] = d.get('why_urgent', '')
         p['action'] = d.get('action', '')
         p['tag'] = d.get('tag', '')
 
@@ -401,10 +404,15 @@ def _links_md(p):
     return s
 
 
+def is_hot(p):
+    return (p.get('score') or 0) >= int(CFG.get('hot_score', 8))
+
+
 def _card_md(p):
     s = p.get('score')
     stars = '⭐' * max(1, round((s or 5) / 2)) if s is not None else '▫️'
-    lines = [f'### {stars} {p["title"]}',
+    hot = is_hot(p)
+    lines = [f'### {"🔥 " if hot else ""}{stars} {p["title"]}',
              f'**{s if s is not None else "-"}/10** · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]} · {_links_md(p)}']
     if p.get('why'):
         lines.append(f'*入选：{p["why"]}*')
@@ -420,6 +428,8 @@ def _card_md(p):
         lines.append(f'\n💡 **启发**：{p["inspiration"]}')
     if p.get('limitation'):
         lines.append(f'\n⚠️ **局限**：{p["limitation"]}')
+    if hot and p.get('why_urgent'):
+        lines.append(f'\n🚨 **为什么必须重视**：{p["why_urgent"]}')
     if p.get('action'):
         lines.append(f'\n**▸ 建议：{p["action"]}**')
     lines.append('')
@@ -454,8 +464,13 @@ def render_md(hit, today, total_fetched, total_fresh, llm_status='未知', edito
 
 def _card_html(p):
     s = p.get('score', '?')
+    hot = is_hot(p)
     pdf = f' · <a href="{p["pdf"]}">PDF</a>' if p.get('pdf') else ''
-    rows = (f'<h3 style="margin:0 0 6px"><a href="{p["url"]}">{p["title"]}</a></h3>'
+    badge = ('<span style="background:#e65100;color:#fff;font-size:11px;padding:2px 8px;'
+             'border-radius:10px;margin-left:8px">🔥 强相关</span>') if hot else ''
+    style = ('border:2px solid #e65100;background:#fff8f0' if hot
+             else 'border:1px solid #ddd')
+    rows = (f'<h3 style="margin:0 0 6px"><a href="{p["url"]}">{p["title"]}</a>{badge}</h3>'
             f'<div style="color:#888;font-size:12px">{s}/10 · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]}'
             f' · <a href="{p["url"]}">原文</a>{pdf}</div>')
     if p.get('why'):
@@ -476,9 +491,12 @@ def _card_html(p):
                  f'<b>💡 启发：</b>{p["inspiration"]}</p>')
     if p.get('limitation'):
         rows += f'<p style="font-size:12px;color:#a06000">⚠️ {p["limitation"]}</p>'
+    if hot and p.get('why_urgent'):
+        rows += (f'<p style="font-size:13px;background:#ffe9d6;border-left:4px solid #e65100;'
+                 f'padding:8px 10px;border-radius:4px"><b>🚨 为什么必须重视：</b>{p["why_urgent"]}</p>')
     if p.get('action'):
         rows += f'<p style="font-size:13px"><b>▸ 建议：{p["action"]}</b></p>'
-    return (f'<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin:12px 0;'
+    return (f'<div style="{style};border-radius:8px;padding:12px;margin:12px 0;'
             f'font-family:sans-serif;max-width:720px">{rows}</div>')
 
 
@@ -697,7 +715,11 @@ def main():
             state['seen'][p['id']] = today
         save_state(state)
         if hit:
+            hot_n = sum(1 for p in hit if is_hot(p))
+            top = max((p.get('score') or 0) for p in hit)
             subj = f'📚 文献日报 {today}: {len(hit)} 篇命中'
+            if hot_n:
+                subj = f'🔥{subj}，{hot_n} 篇强相关（最高 {top} 分）'
             if not llm_status.startswith('正常'):
                 subj += f'（AI总结{llm_status[:6]}…）'
             push_email(subj, render_html(hit, today, llm_status, editorial))
