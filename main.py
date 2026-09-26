@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """geo-lit-daily：arXiv + OpenAlex 每日文献采集 → 关键词粗筛 → LLM 打分/总结/课题关联 → 日报 → 邮件/微信推送"""
+import html
 import json
 import os
 import re
@@ -80,10 +81,20 @@ def parse_llm_json(txt):
     m = re.search(r'\{', txt)
     if not m:
         raise ValueError('输出中无 JSON')
-    depth = 0
+    depth, in_str, esc = 0, False, False
     for i in range(m.start(), len(txt)):
         c = txt[i]
-        if c == '{':
+        if in_str:
+            if esc:
+                esc = False
+            elif c == '\\':
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == '{':
             depth += 1
         elif c == '}':
             depth -= 1
@@ -421,6 +432,17 @@ def is_hot(p):
     return (p.get('score') or 0) >= int(CFG.get('hot_score', 8))
 
 
+def _norm_tag(p):
+    tags = [g[0] for g in GROUPS if g[0]]
+    t = (p.get('tag') or '').strip()
+    if t in tags:
+        return t
+    for k in tags:
+        if k.lower() == t.lower():
+            return k
+    return None
+
+
 def _card_md(p):
     s = p.get('score')
     stars = '⭐' * max(1, round((s or 5) / 2)) if s is not None else '▫️'
@@ -451,7 +473,7 @@ def _card_md(p):
 
 def render_md(hit, today, total_fetched, total_fresh, llm_status='未知', editorial=''):
     lines = [f'# 📚 文献日报 {today}', '',
-             f'> 采集 {total_fresh} 篇（昨日窗口共 {total_fetched} 条）→ 收录 {len(hit)} 篇'
+             f'> 采集 {total_fresh} 篇（采集窗口共 {total_fetched} 条）→ 收录 {len(hit)} 篇'
              f'｜阈值 {CFG["min_score"]}/10｜上限 {CFG["max_papers"]} 篇',
              f'> AI 总结：**{llm_status}**', '']
     if editorial:
@@ -460,8 +482,7 @@ def render_md(hit, today, total_fetched, total_fresh, llm_status='未知', edito
         lines.append('今天没有命中文献。')
     grouped = {}
     for p in hit:
-        tag = p.get('tag') if p.get('tag') in {g[0] for g in GROUPS if g[0]} else None
-        grouped.setdefault(tag, []).append(p)
+        grouped.setdefault(_norm_tag(p), []).append(p)
     for tag, title in GROUPS:
         grp = grouped.get(tag)
         if not grp:
@@ -476,39 +497,40 @@ def render_md(hit, today, total_fetched, total_fresh, llm_status='未知', edito
 
 
 def _card_html(p):
+    e = html.escape
     s = p.get('score', '?')
     hot = is_hot(p)
-    pdf = f' · <a href="{p["pdf"]}">PDF</a>' if p.get('pdf') else ''
+    pdf = f' · <a href="{e(p["pdf"])}">PDF</a>' if p.get('pdf') else ''
     badge = ('<span style="background:#e65100;color:#fff;font-size:11px;padding:2px 8px;'
              'border-radius:10px;margin-left:8px">🔥 强相关</span>') if hot else ''
     style = ('border:2px solid #e65100;background:#fff8f0' if hot
              else 'border:1px solid #ddd')
-    rows = (f'<h3 style="margin:0 0 6px"><a href="{p["url"]}">{p["title"]}</a>{badge}</h3>'
-            f'<div style="color:#888;font-size:12px">{s}/10 · {"、".join(p["authors"])} · {p["venue"]} · {p["date"]}'
-            f' · <a href="{p["url"]}">原文</a>{pdf}</div>')
+    rows = (f'<h3 style="margin:0 0 6px"><a href="{e(p["url"])}">{e(p["title"])}</a>{badge}</h3>'
+            f'<div style="color:#888;font-size:12px">{s}/10 · {e("、".join(p["authors"]))} · {e(p["venue"])} · {e(p["date"])}'
+            f' · <a href="{e(p["url"])}">原文</a>{pdf}</div>')
     if p.get('why'):
-        rows += f'<p style="font-size:12px;color:#999;font-style:italic">*入选：{p["why"]}*</p>'
+        rows += f'<p style="font-size:12px;color:#999;font-style:italic">*入选：{e(p["why"])}*</p>'
     if p.get('abstract'):
         rows += (f'<p style="font-size:12.5px;color:#444;background:#fafafa;'
                  f'border-left:3px solid #ccc;padding:8px 10px;margin:8px 0">'
-                 f'<b>📄 摘要：</b>{p["abstract"]}</p>')
+                 f'<b>📄 摘要：</b>{e(p["abstract"])}</p>')
     if p.get('one_line'):
-        rows += f'<p style="font-size:13px"><b>一句话：</b>{p["one_line"]}</p>'
+        rows += f'<p style="font-size:13px"><b>一句话：</b>{e(p["one_line"])}</p>'
     if p.get('summary'):
-        rows += f'<p style="font-size:13px">{p["summary"]}</p>'
+        rows += f'<p style="font-size:13px">{e(p["summary"])}</p>'
     if p.get('connection'):
         rows += (f'<p style="font-size:13px;background:#eef5ff;padding:8px;border-radius:6px">'
-                 f'<b>🔗 与课题：</b>{p["connection"]}</p>')
+                 f'<b>🔗 与课题：</b>{e(p["connection"])}</p>')
     if p.get('inspiration'):
         rows += (f'<p style="font-size:13px;background:#f3f0ff;padding:8px;border-radius:6px">'
-                 f'<b>💡 启发：</b>{p["inspiration"]}</p>')
+                 f'<b>💡 启发：</b>{e(p["inspiration"])}</p>')
     if p.get('limitation'):
-        rows += f'<p style="font-size:12px;color:#a06000">⚠️ {p["limitation"]}</p>'
+        rows += f'<p style="font-size:12px;color:#a06000">⚠️ {e(p["limitation"])}</p>'
     if hot and p.get('why_urgent'):
         rows += (f'<p style="font-size:13px;background:#ffe9d6;border-left:4px solid #e65100;'
-                 f'padding:8px 10px;border-radius:4px"><b>🚨 为什么必须重视：</b>{p["why_urgent"]}</p>')
+                 f'padding:8px 10px;border-radius:4px"><b>🚨 为什么必须重视：</b>{e(p["why_urgent"])}</p>')
     if p.get('action'):
-        rows += f'<p style="font-size:13px"><b>▸ 建议：{p["action"]}</b></p>'
+        rows += f'<p style="font-size:13px"><b>▸ 建议：{e(p["action"])}</b></p>'
     return (f'<div style="{style};border-radius:8px;padding:12px;margin:12px 0;'
             f'font-family:sans-serif;max-width:720px">{rows}</div>')
 
@@ -524,11 +546,10 @@ def render_html(hit, today, llm_status='未知', editorial=''):
     if editorial:
         out += (f'<div style="background:#f5f0ff;border-left:4px solid #7c4dff;padding:10px 14px;'
                 f'font-size:14px;font-family:sans-serif;margin:10px 0;max-width:720px">'
-                f'<b>📮 今日速览</b><br>{editorial}</div>')
+                f'<b>📮 今日速览</b><br>{html.escape(editorial)}</div>')
     grouped = {}
     for p in hit:
-        tag = p.get('tag') if p.get('tag') in {g[0] for g in GROUPS if g[0]} else None
-        grouped.setdefault(tag, []).append(p)
+        grouped.setdefault(_norm_tag(p), []).append(p)
     for tag, title in GROUPS:
         grp = grouped.get(tag)
         if not grp:
