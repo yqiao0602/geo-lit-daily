@@ -240,8 +240,10 @@ def fetch_openalex(since=None):
 # ---------------- 关键词粗筛 ----------------
 
 def make_matcher(term):
-    if len(term) <= 4 and re.fullmatch(r'[a-z0-9\-]+', term):
-        return re.compile(r'\b' + re.escape(term) + r'\b', re.I)
+    # 纯字母/数字词一律整词匹配（允许复数），杜绝 script→descriptive 这类子串误命中；
+    # 带连字符的前缀词（geo-、fine-tun、text-to-、hallucinat）保留子串匹配
+    if re.fullmatch(r'[a-z0-9]+', term):
+        return re.compile(r'\b' + re.escape(term) + r'(?:s|es)?\b', re.I)
     return re.compile(re.escape(term), re.I)
 
 
@@ -378,8 +380,19 @@ def llm_editorial(hit):
 
 # ---------------- 渲染 ----------------
 
-def pick(kept):
-    hit = [p for p in kept if p.get('score') is None or p.get('score', 0) >= CFG['min_score']]
+def pick(kept, llm_ok=False):
+    hit, unscored = [], 0
+    for p in kept:
+        s = p.get('score')
+        if s is None:
+            if llm_ok:
+                unscored += 1   # LLM 在岗时，打分失败的不静默放行
+                continue
+            hit.append(p)       # LLM 缺席/全挂：退回关键词直通
+        elif s >= CFG['min_score']:
+            hit.append(p)
+    if unscored:
+        print(f'[过滤] {unscored} 篇打分失败，未收录（防止未审论文混入）')
     hit.sort(key=lambda p: p.get('score') or 0, reverse=True)
     return hit[:CFG['max_papers']]
 
@@ -696,10 +709,11 @@ def main():
     print(f'[粗筛] {len(fresh)} -> {len(kept)}')
 
     kept, llm_status = llm_annotate(kept)
+    llm_ok = llm_status.startswith('正常')
     scored = sorted((p['score'] for p in kept if p.get('score') is not None), reverse=True)
     if scored:
         print(f'[LLM] {llm_status} | 全部分数(降序): {scored[:15]}')
-    hit = pick(kept)
+    hit = pick(kept, llm_ok)
     print(f'[收录] {len(hit)} 篇')
 
     editorial = llm_editorial(hit) if hit else ''
