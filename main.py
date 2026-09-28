@@ -264,6 +264,10 @@ def kw_filter(papers):
     S = [make_matcher(t) for t in CFG['filter']['strong_terms']]
     R = [make_matcher(t) for t in CFG['filter'].get('rl_terms', [])]
     M = [make_matcher(t) for t in CFG['filter'].get('method_target_terms', [])]
+    WA = [make_matcher(t) for t in CFG['filter'].get('workflow_terms', [])]
+    WB = [make_matcher(t) for t in CFG['filter'].get('toolcode_terms', [])]
+    TR = [make_matcher(t) for t in CFG['filter'].get('transfer_terms', [])]
+    LG = [make_matcher(t) for t in CFG['filter'].get('llm_gate_terms', [])]
     kept = []
     for p in papers:
         if p.get('author_hit'):
@@ -273,6 +277,14 @@ def kw_filter(papers):
         text = (p['title'] + ' ' + p['abstract']).lower()
         if any(r.search(text) for r in S):
             p['why'] = '强命中'
+            kept.append(p)
+            continue
+        if any(r.search(text) for r in WA) and any(r.search(text) for r in WB):
+            p['why'] = '工作流×工具推理'
+            kept.append(p)
+            continue
+        if any(r.search(text) for r in TR) and any(r.search(text) for r in LG):
+            p['why'] = '能力迁移'
             kept.append(p)
             continue
         if any(r.search(text) for r in R) and any(m.search(text) for m in M):
@@ -297,24 +309,39 @@ def llm_annotate(papers):
     if not papers:
         return papers, '无候选'
     sys_prompt = (
-        '你是科研文献筛选助手。我的研究方向如下：\n' + CFG['profile'].strip() + '\n\n'
-        '打分校准（严格遵守）：只把「以 GIS/地理处理工作流、算子链、地理空间代码或工具调用的'
-        '自动化生成本身作为研究对象」的论文判为高分（方法/模型/系统/基准 8-10，其直接支撑技术'
-        '如 KG 约束生成、约束解码、领域微调、评测协议、工作流中间表示，以及面向代码生成/'
-        '工具调用/工作流/智能体的 RL 与偏好后训练（GRPO/DPO/过程奖励/可验证奖励）、'
-        '参数高效微调（LoRA/QLoRA/PEFT）判 5-7）。'
-        '凡是「把 GIS/遥感/空间分析仅仅当作工具去解决其他领域问题」的应用论文'
-        '（如考古、碳封存、选址、生态、农业、城市治理、灾害评估等），无论 GIS 用得多深，一律 0-2 分。\n\n'
+        '你是科研文献筛选助手。我的研究问题与画像如下：\n' + CFG['profile'].strip() + '\n\n'
+        '核心判定框架——这篇论文能否解释、支撑或改进以下任一环节：\n'
+        '① GIS Task→Workflow（任务分解/流程规划/工作流推理）\n'
+        '② Workflow→结构化表示（结构化/依赖/DAG 生成）\n'
+        '③ 能力迁移（跨域/跨平台/跨工具：GEE→QGIS、tool→tool、code→tool、NL→API、源域→目标域）\n'
+        '④ Workflow→QGIS Operator 落地（grounding）\n'
+        '⑤ 结构化 QGIS 图生成（processes+links）\n'
+        '⑥ 训练/后训练（DAPT/SFT/PEFT/蒸馏/持续学习/偏好与RL）\n'
+        '⑦ 评测（基准/指标/错误分析）\n\n'
+        '打分校准（严格遵守）：\n'
+        '8-10 分：直接研究核心问题——①GIS workflow reasoning；②tool/operator grounding；'
+        '③跨域/跨平台能力迁移。注意：第③类即使全文没有 GIS 词汇，只要是 LLM/基础模型上'
+        'tool→tool、code→tool、源域→目标域的能力迁移实证研究，也判 8-10。\n'
+        '5-7 分：支撑上述环节的通用方法——结构化生成、planning/reasoning、迁移/适配/'
+        '持续学习/蒸馏、约束解码、tool use/calling、代码生成、PEFT/SFT/DAPT、评测协议。'
+        '蒸馏与持续学习按此档对待（是需要订阅的候选解释框架，不预设采用）。\n'
+        '0-2 分：把 GIS/遥感/空间分析仅当工具的应用论文（考古、选址、生态、农业、城市治理等，'
+        '无论 GIS 用得多深）；以及纯 RL 算法改进（GRPO/DPO 在数学或通用推理上的新变体，'
+        '不绑定 tool/code/workflow/GIS 场景的）。\n\n'
         '下面给你一篇论文的标题与摘要，请只输出一个 JSON 对象，不要输出任何其他文字：\n'
         '{"score": 0到10的整数(与课题相关性), "one_line": "一句话概括论文做了什么(中文)", '
         '"summary": "2-3句中文总结(痛点/方法/结果)", '
-        '"connection": "与我的课题的具体联系，指明相关模块(如M1架构/M2领域预训练/M3微调/KG约束/landing/评测/数据/可对比基线)；若无关就写\\"无关\\"。'
-        '若 score>=8，connection 必须写成逐模块详细对照(4-6句)，summary 也写满3句", '
+        '"connection": "与课题的具体联系：指明支撑的环节编号(①-⑦)并说明对应关系；'
+        '若 score>=8，必须写成逐环节详细对照(4-6句)；若无关就写\\"无关\\"", '
         '"inspiration": "这篇论文能给课题带来的新启发或可直接偷的具体做法(1-2句)；没有则写\\"无\\"", '
         '"limitation": "论文自身局限或引用时注意点(1句)", '
-        '"why_urgent": "仅当 score>=8 时必填：2-3 句说明为什么这篇必须立即重视——是竞品动向/与某条路线撞车/有可直接借用的方法或协议；其余情况写\\"\\"", '
+        '"why_urgent": "仅当 score>=8 时必填：2-3 句说明为什么这篇必须立即重视——是竞品动向/'
+        '与核心科学问题撞车/有可直接借用的方法或协议；其余情况写\\"\\"", '
         '"action": "精读|对比基线|引用|略读|忽略 之一", '
-        '"tag": "M1|M2|M3|rl|KG|landing|eval|data|baseline|综述|无关 之一，其中 rl 表示强化学习/偏好优化/参数高效微调等训练方法"}'
+        '"tag": "baseline|wr|transfer|grounding|structgen|agent|code|constrained|training|'
+        'distill|rl|eval|data|综述|无关 之一。其中 wr=工作流推理/任务分解，transfer=跨域跨平台'
+        '能力迁移，grounding=工具/算子落地，structgen=结构化/依赖/DAG生成，constrained=约束'
+        '生成与解码，training=DAPT/SFT/PEFT，distill=蒸馏/持续学习，rl=偏好与强化学习"}'
     )
     ok = 0
 
@@ -408,14 +435,18 @@ def pick(kept, llm_ok=False):
     return hit[:CFG['max_papers']]
 
 
-GROUPS = [('baseline', '🎯 直接竞品与对比基线'),
-          ('M1', '🧩 M1 · 自研架构'),
-          ('M2', '🎓 M2 · 领域继续预训练与后训练'),
-          ('M3', '⚡ M3 · 任务级微调'),
-          ('rl', '🧪 训练方法 · RL/偏好/微调'),
-          ('KG', '🕸️ 知识图谱与约束'),
-          ('landing', '🛬 Landing 与工具落地'),
+GROUPS = [('baseline', '🎯 竞品与对比基线'),
+          ('wr', '🧭 Workflow Reasoning（任务分解/流程规划）'),
+          ('transfer', '🔁 能力迁移（跨域/跨平台）'),
+          ('grounding', '🛠️ Tool/Operator Grounding'),
+          ('structgen', '🧱 Structured Generation（结构化生成）'),
+          ('agent', '🤖 GIS Agent 与工具使用'),
+          ('code', '💻 代码生成与程序合成'),
+          ('constrained', '🔒 约束生成与解码'),
+          ('training', '🎓 训练与后训练（DAPT/SFT/PEFT）'),
+          ('distill', '🧬 蒸馏与持续学习'),
           ('eval', '📏 评测与基准'),
+          ('rl', '🎲 RL/偏好（储备池）'),
           ('data', '📦 数据与语料'),
           ('综述', '📚 综述与立场'),
           (None, '🧷 其他')]

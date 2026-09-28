@@ -52,10 +52,20 @@ openalex:
     - "geographic question answering"
     - "spatially explicit machine learning"
     - "geospatial tool"
+    - "QGIS"
+    - "workflow reasoning"
+    - "task decomposition language model"
 
 # ---- 关键词粗筛（省 LLM token 的第一道闸）----
-# 规则：命中 strong 任一 → 收；或 命中 domain≥1 且 task≥1 → 收；
-#       或 命中 rl≥1 且 method_target≥1 → 收（RL/PEFT × 代码/工具/工作流交叉，不要求 GIS 词汇）
+# 通道（按优先级）：
+#   ① strong 任一命中 → 收
+#   ② workflow_terms ∧ toolcode_terms → 收（工作流/工具推理通道，不要求 GIS 词汇）
+#   ③ transfer_terms ∧ llm_gate_terms → 收（能力迁移通道，不要求 GIS 词汇）
+#   ④ rl_terms ∧ method_target_terms → 收（RL 仅当绑定代码/工具/工作流场景）
+#   ⑤ domain_terms ∧ task_terms → 收
+#   ⑥ 作者跟踪 → 绕过一切直收
+# 注意：GEE/Earth Engine/QGIS 是平台语境词（在 domain_terms），不再是强命中词——
+#       "用 GEE 做土地覆盖分类"类应用论文应被挡在闸外
 filter:
   domain_terms: [geospatial, gis, qgis, arcgis, arcpy, google earth engine, earth engine,
                  remote sensing, earth observation, geographic, geography, spatial data,
@@ -68,16 +78,39 @@ filter:
                retrieval-augmented, rag, copilot, chatbot, hallucinat, natural language,
                text-to-, automation, script, geo-question, question answering,
                lora, qlora, peft, parameter-efficient, structured output,
-               constrained decoding, self-correct, self-refine, self-debug]
-  strong_terms: [geospatial code, gis copilot, earth engine, qgis, geoprocessing workflow,
-                 spatial workflow, gis agent, geoai, geospatial agent, geographic question,
-                 nl2gis, gis large language, geospatial tool, gis tool, geoagent]
+               constrained decoding, self-correct, self-refine, self-debug,
+               task decomposition, structured prediction, dependency prediction,
+               multi-step planning, multi-step reasoning, workflow reasoning,
+               tool selection, tool grounding, process planning, structured generation,
+               graph generation, iterative refinement, error recovery]
+  strong_terms: [geospatial code, gis copilot, geospatial agent, gis agent, geoagent,
+                 nl2gis, gis large language, geospatial tool, gis tool,
+                 geoprocessing workflow, spatial workflow, geoai,
+                 workflow reasoning, geographic question]
   rl_terms: [reinforcement learning, rlhf, grpo, dpo, ppo, preference optimization,
              preference learning, reward model, process reward, verifiable reward,
              reinforcement fine-tuning, policy optimization, self-play]
   method_target_terms: [code generation, program synthesis, tool use, tool calling,
                         tool call, agent, workflow, structured output,
                         constrained decoding, planning]
+  workflow_terms: [workflow, workflow planning, workflow generation, workflow reasoning,
+                   task decomposition, process planning, multi-step planning,
+                   multi-step reasoning, procedural reasoning]
+  toolcode_terms: [tool use, tool selection, tool calling, tool grounding, tool learning,
+                   tool call, function call, api call, code generation, program synthesis,
+                   structured generation, graph generation, operator selection]
+  transfer_terms: [cross-domain transfer, knowledge transfer, capability transfer,
+                   task transfer, cross-task transfer, cross-domain generalization,
+                   domain generalization, domain adaptation, task adaptation,
+                   knowledge adaptation, transfer learning, continued pretraining,
+                   continual pretraining, continual learning, multi-stage training,
+                   intermediate pretraining, intermediate fine-tuning,
+                   sequential fine-tuning, transfer, knowledge distillation,
+                   task distillation, behavior distillation, representation transfer,
+                   zero-shot transfer, few-shot transfer, cross-platform, cross-tool,
+                   tool transfer, platform transfer]
+  llm_gate_terms: [llm, large language model, language model, foundation model,
+                   instruction-tun, gpt, llama, qwen]
 
 # ---- LLM（OpenAI 兼容协议；密钥走环境变量 LIT_LLM_API_KEY）----
 llm:
@@ -95,18 +128,21 @@ backfill:
 
 # ---- 研究画像（注入 LLM prompt，决定打分和"与课题的联系"）----
 profile: |
-  课题：根据自然语言任务描述，自动构建可靠、完整、顺序正确、可解释的 QGIS 地理处理工作流（算子链）。
-  架构要点：
-  - L3：平台无关的"操作原语"中间表示（类似编译器 IR），GEE/QGIS 算子映射到统一语义层
-  - M1 路线：自研模型 = BERT 文本编码 + Transformer 自回归解码器 + FiLM 条件调制
-    + 知识图谱约束解码（转移合法性矩阵、I/O 类型约束）+ 分级回退修复
-  - M2 路线：Qwen3.5-9B-Base 领域继续预训练(DAPT) + 领域指令 SFT + 过程监督/偏好后训练
-  - M3 路线：官方后训练模型的任务级 QLoRA 微调基线
-  - 评估：三层——L3 规划 / L3→QGIS landing / 最终工作流人工可用率
-  关注技术词：geospatial code generation、GIS agent/copilot、NL2Code、工具调用、
-  workflow 自动构建、neuro-symbolic、知识图谱增强生成、RAG、constrained decoding、
-  intermediate representation、GIS 评测基准、GEE/QGIS/ArcGIS 自动化。
-  方法侧同等关注（即使不涉及 GIS）：强化学习/偏好后训练（GRPO、DPO、RLHF、过程奖励 PRM、
-  可验证奖励 RLVR、rejection sampling）、参数高效微调（LoRA/QLoRA/PEFT 变体）、
-  约束解码与结构化输出、过程监督——这些用于 M2 后训练与 M3 微调路线设计。
-  期刊论文若涉及 GIS 语义工作流、本体、地理知识图谱、地理问答，也算相关。
+  核心科学问题（Route-2）：一个模型在 GEE workflow 上学到的 GIS 工作流推理能力
+  （Workflow Reasoning：任务分解、步骤规划、依赖组织），能否在不依赖显式 L3
+  语义中间层的情况下，迁移到 QGIS operator grounding，最终生成结构正确、
+  依赖闭合、可执行的 QGIS processes + links 图结构。
+  研究管线：GIS Task → Workflow Reasoning → 模型内部可迁移的工作流知识 →
+  能力/知识迁移 → QGIS Grounding → 结构化 QGIS 图生成。
+  七个可支撑环节：①GIS Task→Workflow ②Workflow→结构化表示 ③能力迁移
+  （跨域/跨平台/跨工具：GEE→QGIS、tool→tool、NL→API、源域→目标域）
+  ④Workflow→QGIS Operator 落地 ⑤结构化 QGIS 图生成 ⑥训练/后训练
+  ⑦评测。
+  DAPT/SFT/LoRA/蒸馏/持续学习/偏好与 RL 是实现手段而非研究主轴；RL 为储备池，
+  仅当绑定 tool/code/workflow/GIS 场景时才算高相关，纯 RL 算法改进不算。
+  平台（GEE/QGIS/遥感）是实验语境词：用 GEE/QGIS 做土地覆盖、生态监测、城市
+  分析等应用的论文不是我们要的；我们要的是"工作流推理/工具落地/能力迁移/
+  结构化生成"本身——即使论文完全没有 GIS 词汇，只要它在 LLM/基础模型上研究
+  这些能力，就高度相关。
+  评测关注：工作流推理质量、迁移保持率（transfer retention）、QGIS 落地可用率、
+  幻觉算子率、执行成功率。
