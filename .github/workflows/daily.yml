@@ -2,7 +2,9 @@ name: daily
 
 on:
   schedule:
-    - cron: "30 23 * * *"   # UTC 23:30 = 北京时间 07:30
+    - cron: "30 21 * * *"   # UTC 21:30 = 北京时间 05:30（DeepSeek 空闲时段）。
+                            # 预留 GitHub 调度延迟 2-3h 余量，确保 LLM 调用
+                            # 全程落在空闲时段（高峰为北京 9:00-12:00、14:00-18:00）
   workflow_dispatch: {}     # 支持手动触发
 
 permissions:
