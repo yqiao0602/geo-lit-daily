@@ -16,6 +16,8 @@ from email.header import Header
 from email.mime.text import MIMEText
 
 import smtplib
+import threading
+from datetime import datetime, timezone
 
 import yaml
 
@@ -28,6 +30,16 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
 
 with open(os.path.join(BASE, 'config.yaml'), encoding='utf-8') as f:
     CFG = yaml.safe_load(f)
+
+
+def _safe_http_error(error):
+    text = str(error)
+    for key_name in ('LIT_OPENALEX_API_KEY', 'LIT_SEMANTIC_SCHOLAR_API_KEY'):
+        secret = os.environ.get(key_name, '').strip()
+        if secret:
+            text = text.replace(secret, '[redacted]')
+            text = text.replace(urllib.parse.quote(secret, safe=''), '[redacted]')
+    return text
 
 
 def http_get(url, timeout=45, retries=4):
@@ -45,6 +57,8 @@ def http_get(url, timeout=45, retries=4):
             if e.code >= 500:
                 time.sleep(6 * (i + 1))
                 continue
+            if os.environ.get('LIT_OPENALEX_API_KEY') and os.environ['LIT_OPENALEX_API_KEY'] in url:
+                raise RuntimeError(f'OpenAlex HTTP {e.code}: {e.reason}') from None
             raise
         except Exception as e:
             last = e
@@ -185,6 +199,9 @@ def fetch_openalex(since=None):
     datef = f'from_publication_date:{d0:%Y-%m-%d}'
     select = '&select=id,doi,title,publication_date,authorships,primary_location,abstract_inverted_index,ids'
     base = f'https://api.openalex.org/works?mailto={urllib.parse.quote(CFG["mailto"])}'
+    oa_key = os.environ.get('LIT_OPENALEX_API_KEY', '').strip()
+    if oa_key:
+        base += f'&api_key={urllib.parse.quote(oa_key, safe="")}'
 
     urls = []
     if daily:
@@ -239,7 +256,7 @@ def fetch_openalex(since=None):
             try:
                 data = json.loads(http_get(f'{url}&page={page}'))
             except Exception as e:
-                print(f'  [warn] OpenAlex {label} 第{page}页失败: {e}')
+                print(f'  [warn] OpenAlex {label} 第{page}页失败: {_safe_http_error(e)}')
                 break
             absorb(data.get('results', []))
             time.sleep(1.5)
@@ -248,7 +265,140 @@ def fetch_openalex(since=None):
     return papers
 
 
-# ---------------- 关键词粗筛 ----------------
+# ---------------- Semantic Scholar ----------------
+
+class _S2RateLimiter:
+    def __init__(self, interval=1.0):
+        self.interval = interval
+        self._lock = threading.Lock()
+        self._last = None
+
+    def wait(self):
+        with self._lock:
+            now = time.monotonic()
+            if self._last is not None:
+                time.sleep(max(0.0, self.interval - (now - self._last)))
+            self._last = time.monotonic()
+
+
+_S2_LIMITER = _S2RateLimiter()
+
+
+def _s2_retry_after(error):
+    value = error.headers.get('Retry-After') if error.headers else None
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            target = datetime.strptime(value, '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc)
+            return max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
+        except ValueError:
+            return None
+
+
+def _s2_get(url, headers, timeout=45, retries=4):
+    last = None
+    for i in range(retries):
+        _S2_LIMITER.wait()
+        try:
+            req = urllib.request.Request(url, headers={
+                'User-Agent': f'geo-lit-daily ({CFG["mailto"]})',
+                **headers,
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode('utf-8', errors='ignore')
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code == 429 or e.code >= 500:
+                retry_after = _s2_retry_after(e)
+                if retry_after is not None:
+                    time.sleep(retry_after)
+                else:
+                    time.sleep(min(60, 2 ** i))
+                continue
+            if os.environ.get('LIT_SEMANTIC_SCHOLAR_API_KEY'):
+                raise RuntimeError(f'Semantic Scholar HTTP {e.code}: {e.reason}') from None
+            raise
+        except Exception as e:
+            last = e
+            time.sleep(min(60, 2 ** i))
+    raise last
+
+
+def _s2_date(paper):
+    year = paper.get('year')
+    if paper.get('publicationDate'):
+        return paper['publicationDate']
+    return f'{year}-01-01' if year else ''
+
+
+def _s2_record(paper, author_names):
+    external = paper.get('externalIds') or {}
+    doi = (external.get('DOI') or '').strip()
+    arxiv = (external.get('ArXiv') or '').strip()
+    pid = f'doi:{doi.lower()}' if doi else (f'arxiv:{arxiv}' if arxiv else f's2:{paper.get("paperId")}')
+    url = paper.get('url') or (f'https://doi.org/{doi}' if doi else '')
+    pdf = ((paper.get('openAccessPdf') or {}).get('url') or '')
+    authors = [a.get('name', '?') for a in (paper.get('authors') or []) if a.get('name')][:6]
+    hits = [name for name in author_names if any(name.lower() == a.lower() for a in authors)]
+    return {
+        'id': pid,
+        'title': paper.get('title') or '(无题)',
+        'abstract': paper.get('abstract') or '',
+        'authors': authors,
+        'venue': paper.get('venue') or 'Semantic Scholar',
+        'url': url or f'https://www.semanticscholar.org/paper/{paper.get("paperId")}',
+        'pdf': pdf,
+        'date': _s2_date(paper),
+        'author_hit': hits,
+    }
+
+
+def fetch_semantic_scholar(since=None):
+    key = os.environ.get('LIT_SEMANTIC_SCHOLAR_API_KEY', '').strip()
+    if not key:
+        print('[info] 未配置 LIT_SEMANTIC_SCHOLAR_API_KEY，跳过 Semantic Scholar')
+        return []
+    s2 = CFG.get('semantic_scholar', {})
+    daily = since is None
+    d0 = date.today() - timedelta(days=s2.get('window_days', 5)) if daily else since
+    max_pages = s2.get('daily_pages', 1) if daily else s2.get('backfill_pages', 3)
+    limit = min(100, int(s2.get('page_size', 100)))
+    fields = 'paperId,title,abstract,authors,venue,publicationDate,year,url,openAccessPdf,externalIds'
+    author_names = [a.get('name', '') for a in CFG['openalex'].get('authors', [])]
+    papers, seen = [], set()
+    queries = s2.get('search_queries', CFG['openalex'].get('search_queries', []))
+    for query in queries:
+        for page in range(max_pages):
+            params = urllib.parse.urlencode({
+                'query': query,
+                'limit': limit,
+                'offset': page * limit,
+                'fields': fields,
+                'publicationDateOrYear': f'{d0:%Y-%m-%d}:{date.today():%Y-%m-%d}',
+            })
+            url = f'https://api.semanticscholar.org/graph/v1/paper/search?{params}'
+            try:
+                data = json.loads(_s2_get(url, {'x-api-key': key}))
+            except Exception as e:
+                print(f'  [warn] Semantic Scholar 检索:{query} 第{page + 1}页失败: {_safe_http_error(e)[:120]}')
+                break
+            for paper in data.get('data', []):
+                paper_id = paper.get('paperId')
+                if not paper_id or paper_id in seen:
+                    continue
+                seen.add(paper_id)
+                try:
+                    papers.append(_s2_record(paper, author_names))
+                except Exception as e:
+                    print(f'  [warn] Semantic Scholar 解析单条记录失败: {e}')
+            if len(data.get('data', [])) < limit:
+                break
+    return papers
+
+
 
 def make_matcher(term):
     # 纯字母/数字词一律整词匹配（允许复数），杜绝 script→descriptive 这类子串误命中；
@@ -637,6 +787,12 @@ def backfill(since):
         papers += oa
     except Exception as e:
         print(f'[warn] OpenAlex 失败: {e}')
+    try:
+        s2 = fetch_semantic_scholar(since)
+        print(f'[Semantic Scholar] {len(s2)} 篇')
+        papers += s2
+    except Exception as e:
+        print(f'[warn] Semantic Scholar 失败: {e}')
     seen_titles, uniq = set(), []
     for p in papers:
         t = re.sub(r'\W', '', p['title'].lower())[:80]
@@ -739,8 +895,14 @@ def main():
         papers += oa
     except Exception as e:
         print(f'[warn] OpenAlex 拉取失败: {e}')
+    try:
+        s2 = fetch_semantic_scholar()
+        print(f'[Semantic Scholar] {len(s2)} 篇')
+        papers += s2
+    except Exception as e:
+        print(f'[warn] Semantic Scholar 拉取失败: {e}')
     if not papers:
-        print('[error] 两个数据源均失败，退出')
+        print('[error] 所有数据源均失败或无结果，退出')
         sys.exit(1)
 
     # 标题级去重（跨源同一篇）

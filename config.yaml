@@ -56,6 +56,15 @@ openalex:
     - "workflow reasoning"
     - "task decomposition language model"
 
+# ---- 数据源 3：Semantic Scholar 关键词检索 ----
+# API key 通过环境变量 LIT_SEMANTIC_SCHOLAR_API_KEY 注入，不写入此文件。
+semantic_scholar:
+  window_days: 5
+  daily_pages: 1
+  backfill_pages: 3
+  page_size: 100
+  search_queries: []  # 为空时复用 openalex.search_queries
+
 # ---- 关键词粗筛（省 LLM token 的第一道闸）----
 # 通道（按优先级）：
 #   ① strong 任一命中 → 收

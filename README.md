@@ -2,7 +2,7 @@
 
 针对课题「自然语言 → 工作流自动构建」的私人文献日报系统。
 
-**数据源**：arXiv（cs.AI/CL/LG/SE 预印本）+ OpenAlex（12 本 GIS 期刊 + 12 位跟踪作者 + 关键词全库检索）
+**数据源**：arXiv（cs.AI/CL/LG/SE 预印本）+ OpenAlex（12 本 GIS 期刊 + 12 位跟踪作者 + 关键词全库检索）+ Semantic Scholar（关键词检索）
 **流程**：采集 → 关键词粗筛 → LLM 打分/中文总结/课题关联 → markdown 日报 → 邮件 + Server酱微信
 **运行**：GitHub Actions 每天北京时间 05:30 触发（DeepSeek 空闲时段，避开 9:00 起的高峰计费；含调度延迟，日报约 07:00-08:30 送达），日报归档在 `daily/` 目录
 
@@ -43,6 +43,8 @@ git push -u origin main
 | Secret 名 | 值 | 说明 |
 |---|---|---|
 | `LIT_LLM_API_KEY` | sk-xxx | LLM 密钥（DeepSeek/GLM/Qwen 等任意 OpenAI 兼容服务） |
+| `LIT_OPENALEX_API_KEY` | （OpenAlex API key） | OpenAlex API key；不设置也可使用公开 API |
+| `LIT_SEMANTIC_SCHOLAR_API_KEY` | （Semantic Scholar API key） | Semantic Scholar API key；S2 所有请求共享 1 req/sec 限速 |
 | `LIT_LLM_BASE_URL` | `https://api.deepseek.com` | 与密钥配套的接口地址（DeepSeek 带不带 `/v1` 均可） |
 | `LIT_LLM_MODEL` | `deepseek-flash` | 模型名（2026-09 DeepSeek 在售：deepseek-flash；GLM 示例：glm-4.6） |
 | `LIT_SMTP_HOST` | `smtp.qq.com` | 发件邮箱 SMTP（QQ/163 均可） |
@@ -53,7 +55,9 @@ git push -u origin main
 | `LIT_SERVERCHAN_KEY` | SCTxxxx | [sct.ftqq.com](https://sct.ftqq.com) 微信扫码登录后复制 SendKey；不需要微信推送可不配 |
 
 4. 仓库 → Actions → daily → Enable workflow；可先点 Run workflow 手动跑一次验证
-5. 之后每天北京时间约 07:30 自动推送，`daily/` 目录自动归档
+5. 之后每天北京时间约 05:30 触发，日报通常约 07:00-08:30 推送；`daily/` 目录自动归档
+
+> **密钥安全**：仅在 GitHub Actions Secrets 或本地环境变量中配置 API key，切勿提交到 `config.yaml`、日报或日志。Semantic Scholar 所有 endpoint 合计限速 1 req/sec；日报与 backfill workflow 使用同一并发组串行运行。由于 API key 已在聊天中明文提供，建议在 S2 和 OpenAlex 控制台撤销并重新生成，再更新上述 Secrets。
 
 ## 日常调整（都在 config.yaml）
 

@@ -7,6 +7,10 @@ on:
                             # 全程落在空闲时段（高峰为北京 9:00-12:00、14:00-18:00）
   workflow_dispatch: {}     # 支持手动触发
 
+concurrency:
+  group: literature-api
+  cancel-in-progress: false
+
 permissions:
   contents: write           # 允许回写日报和 state.json
 
@@ -33,6 +37,8 @@ jobs:
           LIT_SMTP_PASS: ${{ secrets.LIT_SMTP_PASS }}
           LIT_TO_EMAIL: ${{ secrets.LIT_TO_EMAIL }}
           LIT_SERVERCHAN_KEY: ${{ secrets.LIT_SERVERCHAN_KEY }}
+          LIT_OPENALEX_API_KEY: ${{ secrets.LIT_OPENALEX_API_KEY }}
+          LIT_SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.LIT_SEMANTIC_SCHOLAR_API_KEY }}
         run: python main.py
 
       - name: 归档日报与去重状态

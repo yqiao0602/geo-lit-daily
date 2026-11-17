@@ -8,6 +8,10 @@ on:
         required: false
         default: '2024'
 
+concurrency:
+  group: literature-api
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -29,6 +33,8 @@ jobs:
           LIT_LLM_API_KEY: ${{ secrets.LIT_LLM_API_KEY }}
           LIT_LLM_BASE_URL: ${{ secrets.LIT_LLM_BASE_URL }}
           LIT_LLM_MODEL: ${{ secrets.LIT_LLM_MODEL }}
+          LIT_OPENALEX_API_KEY: ${{ secrets.LIT_OPENALEX_API_KEY }}
+          LIT_SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.LIT_SEMANTIC_SCHOLAR_API_KEY }}
         run: python main.py --backfill ${{ inputs.since }}
 
       - name: 归档 backlog
