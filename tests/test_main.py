@@ -41,6 +41,22 @@ class PipelineTests(unittest.TestCase):
             main.fetch_openalex()
         self.assertIn('api_key=a%2Fb', captured[0])
 
+    def test_pick_only_core_papers_and_limits_to_three(self):
+        papers = [
+            {'id': 'a', 'score': 9, 'core_relevance': True, 'date': '2026-01-01'},
+            {'id': 'b', 'score': 10, 'core_relevance': False, 'date': '2026-01-02'},
+            {'id': 'c', 'score': 8, 'core_relevance': True, 'date': '2026-01-03'},
+            {'id': 'd', 'score': 9, 'core_relevance': True, 'date': '2026-01-04'},
+            {'id': 'e', 'score': 8, 'core_relevance': True, 'date': '2026-01-05'},
+            {'id': 'f', 'score': 7, 'core_relevance': True, 'date': '2026-01-06'},
+            {'id': 'g', 'score': None, 'core_relevance': True, 'date': '2026-01-07'},
+        ]
+        self.assertEqual([p['id'] for p in main.pick(papers)], ['d', 'a', 'e'])
+
+    def test_pick_rejects_unscored_or_unconfirmed_when_llm_unavailable(self):
+        papers = [{'score': None}, {'score': 10}, {'score': 9, 'core_relevance': 'true'}]
+        self.assertEqual(main.pick(papers, llm_ok=False), [])
+
     def test_s2_missing_key_skips_network(self):
         with mock.patch.dict(os.environ, {}, clear=True), \
              mock.patch('main._s2_get') as get:

@@ -64,7 +64,8 @@ git push -u origin main
 - **研究画像**：`profile` 字段，直接改中文描述，LLM 打分和"与课题联系"随之变化
 - **加减期刊**：`openalex.journals`（去 [openalex.org](https://openalex.org) 搜期刊名拿 source id）
 - **加减作者**：`openalex.authors`（OpenAlex 搜作者名拿 author id；重名多，务必核对单位）
-- **收录量**：`min_score`（阈值）、`max_papers`（上限）
+- **收录量**：`daily_min_score`（日报主推阈值，默认 8）、`max_papers`（日报主推上限，默认 3）；`min_score` 仍用于历史回溯
+- **每日主推**：仅推送直接支撑核心研究链条、且 LLM 确认核心相关的论文；无合格论文或 LLM 无法评分时不推送，不用关键词结果凑数。通用方法等弱相关论文不进入日报；目前尚无每周候选池或周报，已采集文献仍按现有状态去重。
 - **粗筛词表**：`filter` 三组词（strong 任一命中即收；domain+task 需同时命中）
 - `mailto` 建议改成自己真实邮箱（OpenAlex polite pool，限流更宽松）
 

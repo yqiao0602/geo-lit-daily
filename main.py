@@ -469,7 +469,7 @@ def llm_annotate(papers):
         '⑥ 训练/后训练（DAPT/SFT/PEFT/蒸馏/持续学习/偏好与RL）\n'
         '⑦ 评测（基准/指标/错误分析）\n\n'
         '打分校准（严格遵守）：\n'
-        '8-10 分：直接研究核心问题——①GIS workflow reasoning；②tool/operator grounding；'
+        '8-10 分：直接研究核心问题，并能为研究决策提供具体证据、方法、关键基线或评测设计——①GIS workflow reasoning；②tool/operator grounding；'
         '③跨域/跨平台能力迁移。注意：第③类即使全文没有 GIS 词汇，只要是 LLM/基础模型上'
         'tool→tool、code→tool、源域→目标域的能力迁移实证研究，也判 8-10。\n'
         '5-7 分：支撑上述环节的通用方法——结构化生成、planning/reasoning、迁移/适配/'
@@ -477,9 +477,10 @@ def llm_annotate(papers):
         '蒸馏与持续学习按此档对待（是需要订阅的候选解释框架，不预设采用）。\n'
         '0-2 分：把 GIS/遥感/空间分析仅当工具的应用论文（考古、选址、生态、农业、城市治理等，'
         '无论 GIS 用得多深）；以及纯 RL 算法改进（GRPO/DPO 在数学或通用推理上的新变体，'
-        '不绑定 tool/code/workflow/GIS 场景的）。\n\n'
+        '不绑定 tool/code/workflow/GIS 场景的）。泛泛的 LLM/Agent 方法，若无法明确支撑核心链条及研究决策，不可主推。\n\n'
+        'core_relevance 仅在论文直接研究工作流推理、跨工具/平台能力迁移、工具/算子落地或结构化可执行工作流生成，且可为本课题提供具体可用证据、方法、基线或评测时为 true；通用方法、仅应用 GIS 或证据不足时为 false。不得仅凭关键词或作者判断。\n'
         '下面给你一篇论文的标题与摘要，请只输出一个 JSON 对象，不要输出任何其他文字：\n'
-        '{"score": 0到10的整数(与课题相关性), "one_line": "一句话概括论文做了什么(中文)", '
+        '{"core_relevance": true或false, "score": 0到10的整数(与课题相关性), "one_line": "一句话概括论文做了什么(中文)", '
         '"summary": "2-3句中文总结(痛点/方法/结果)", '
         '"connection": "与课题的具体联系：指明支撑的环节编号(①-⑦)并说明对应关系；'
         '若 score>=8，必须写成逐环节详细对照(4-6句)；若无关就写\\"无关\\"", '
@@ -508,6 +509,7 @@ def llm_annotate(papers):
         d = parse_llm_json(txt)
         raw = d.get('score')
         p['score'] = int(float(raw)) if raw is not None else 0
+        p['core_relevance'] = d.get('core_relevance') is True
         p['one_line'] = d.get('one_line', '')
         p['summary'] = d.get('summary', '')
         p['connection'] = d.get('connection', '')
@@ -569,19 +571,11 @@ def llm_editorial(hit):
 # ---------------- 渲染 ----------------
 
 def pick(kept, llm_ok=False):
-    hit, unscored = [], 0
-    for p in kept:
-        s = p.get('score')
-        if s is None:
-            if llm_ok:
-                unscored += 1   # LLM 在岗时，打分失败的不静默放行
-                continue
-            hit.append(p)       # LLM 缺席/全挂：退回关键词直通
-        elif s >= CFG['min_score']:
-            hit.append(p)
-    if unscored:
-        print(f'[过滤] {unscored} 篇打分失败，未收录（防止未审论文混入）')
-    hit.sort(key=lambda p: p.get('score') or 0, reverse=True)
+    hit = [p for p in kept
+           if p.get('core_relevance') is True
+           and p.get('score') is not None
+           and p['score'] >= CFG.get('daily_min_score', 8)]
+    hit.sort(key=lambda p: (p['score'], p.get('date') or ''), reverse=True)
     return hit[:CFG['max_papers']]
 
 
@@ -655,7 +649,7 @@ def _card_md(p):
 def render_md(hit, today, total_fetched, total_fresh, llm_status='未知', editorial=''):
     lines = [f'# 📚 文献日报 {today}', '',
              f'> 采集 {total_fresh} 篇（采集窗口共 {total_fetched} 条）→ 收录 {len(hit)} 篇'
-             f'｜阈值 {CFG["min_score"]}/10｜上限 {CFG["max_papers"]} 篇',
+             f'｜主推阈值 {CFG.get("daily_min_score", 8)}/10｜上限 {CFG["max_papers"]} 篇',
              f'> AI 总结：**{llm_status}**', '']
     if editorial:
         lines += [f'**📮 今日速览**：{editorial}', '']
